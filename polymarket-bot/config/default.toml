@@ -1,0 +1,66 @@
+[general]
+initial_capital = 2.0
+max_positions = 4
+log_level = "info"
+data_dir = "data"
+
+[trading]
+strategy = "last_minute"
+max_hours_to_resolution = 8760.0
+min_confidence = 0.7
+sort_by = "deadline"
+
+[api]
+gamma_base_url = "http://localhost:3000"
+clob_base_url = "http://localhost:3000"
+timeout_secs = 30
+
+[orderbook]
+max_spread_pct = 0.04
+min_depth = 1000
+min_volume_24h = 10000
+
+[probability]
+prior_weight = 0.3
+news_weight = 0.25
+polling_weight = 0.15
+expert_weight = 0.20
+historical_weight = 0.10
+
+[expected_value]
+cost_per_trade_pct = 0.02
+min_ev_threshold = 0.05
+min_edge_pct = 0.02
+
+[position_sizing]
+kelly_fraction = 0.125
+max_position_pct = 0.25
+min_position_usd = 0.50
+max_position_usd = 0.50
+
+[exit]
+take_profit_pct = 0.30
+stop_loss_pct = 0.20
+trailing_stop_pct = 0.10
+
+[collector]
+interval_secs = 300
+max_markets = 50
+filter_resolved = false
+sort_by = "deadline"
+
+[backtesting]
+default_period_days = 30
+initial_capital = 1000.0
+
+[paper_trading]
+enabled = true
+dry_run = true
+
+[crypto]
+enabled = true
+initial_capital = 2.0
+min_order_usd = 0.50
+max_trades_per_hour = 1
+min_confidence = 0.6
+timeframes = ["5m", "15m", "1h"]

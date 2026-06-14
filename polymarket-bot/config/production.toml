@@ -1,0 +1,38 @@
+[general]
+initial_capital = 2.0
+max_positions = 1
+log_level = "info"
+data_dir = "data-production"
+
+[api]
+gamma_base_url = "https://gamma-api.polymarket.com"
+clob_base_url = "https://clob.polymarket.com"
+timeout_secs = 10
+
+[orderbook]
+max_spread_pct = 0.04
+min_depth = 0.10
+min_volume_24h = 0
+
+[expected_value]
+cost_per_trade_pct = 0.02
+min_ev_threshold = 0.08
+min_edge_pct = 0.08
+
+[position_sizing]
+kelly_fraction = 0.0
+max_position_pct = 0.05
+min_position_usd = 0.10
+max_position_usd = 0.10
+
+[paper_trading]
+enabled = true
+dry_run = true
+
+[crypto]
+enabled = true
+initial_capital = 2.0
+min_order_usd = 0.10
+max_trades_per_hour = 3
+min_confidence = 0.70
+timeframes = ["5m", "15m"]

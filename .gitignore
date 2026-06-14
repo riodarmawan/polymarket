@@ -1,0 +1,12 @@
+/target
+.env
+.env.*
+!*.env.example
+production.env
+secrets/
+CREDENTIALS.md
+/.playwright-mcp/
+/.claude/settings.local.json
+/data/*.db
+__pycache__/
+*.py[cod]

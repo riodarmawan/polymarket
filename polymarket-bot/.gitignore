@@ -1,0 +1,11 @@
+/target
+/data/*.db
+.env
+.env.*
+!*.env.example
+production.env
+secrets/
+CREDENTIALS.md
+*.pyc
+__pycache__
+.playwright-mcp/

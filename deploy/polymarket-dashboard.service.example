@@ -1,0 +1,22 @@
+[Unit]
+Description=Polymarket paper/forward-test dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polymarket
+Group=polymarket
+WorkingDirectory=/opt/polymarket
+EnvironmentFile=/etc/polymarket/production.env
+ExecStart=/opt/polymarket/polymarket-bot/target/release/polymarket-bot web --port 3001
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/polymarket/data-production
+
+[Install]
+WantedBy=multi-user.target
