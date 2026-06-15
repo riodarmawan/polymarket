@@ -1,8 +1,22 @@
+use anyhow::{bail, Result};
 use serde::Deserialize;
-use std::path::Path;
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+pub const STRATEGY_VERSION: &str = "btc-updown-v2";
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
+    #[serde(default)]
+    pub risk: RiskConfig,
+    #[serde(default)]
+    pub execution: ExecutionConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
+    #[serde(default)]
+    pub dashboard: DashboardConfig,
     #[serde(default)]
     pub general: GeneralConfig,
     #[serde(default)]
@@ -27,6 +41,96 @@ pub struct Config {
     pub trading: TradingConfig,
     #[serde(default)]
     pub crypto: CryptoConfig,
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeMode {
+    Paper,
+    Shadow,
+    DrySigned,
+    Canary,
+    Live,
+}
+
+impl fmt::Display for RuntimeMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Paper => "paper",
+            Self::Shadow => "shadow",
+            Self::DrySigned => "dry_signed",
+            Self::Canary => "canary",
+            Self::Live => "live",
+        };
+        formatter.write_str(value)
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeEnvironment {
+    Development,
+    Production,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RuntimeConfig {
+    #[serde(default = "default_runtime_environment")]
+    pub environment: RuntimeEnvironment,
+    #[serde(default = "default_runtime_mode")]
+    pub mode: RuntimeMode,
+    #[serde(default = "default_strategy_version")]
+    pub strategy_version: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RiskConfig {
+    #[serde(default = "default_production_max_positions")]
+    pub max_open_positions: usize,
+    #[serde(default = "default_production_max_order_usd")]
+    pub max_order_usd: f64,
+    #[serde(default = "default_max_daily_orders")]
+    pub max_daily_orders: usize,
+    #[serde(default = "default_max_daily_realized_loss_usd")]
+    pub max_daily_realized_loss_usd: f64,
+    #[serde(default = "default_max_drawdown")]
+    pub max_drawdown: f64,
+    #[serde(default = "default_max_consecutive_losses")]
+    pub max_consecutive_losses: usize,
+    #[serde(default = "default_max_spread_pct")]
+    pub max_spread: f64,
+    #[serde(default = "default_max_data_age_ms")]
+    pub max_data_age_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ExecutionConfig {
+    #[serde(default = "default_order_type")]
+    pub order_type: String,
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+    #[serde(default = "default_true")]
+    pub reconcile_before_ready: bool,
+    #[serde(default = "default_true")]
+    pub cancel_on_shutdown: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct StorageConfig {
+    #[serde(default = "default_database_path")]
+    pub database_path: String,
+    #[serde(default = "default_backup_directory")]
+    pub backup_directory: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DashboardConfig {
+    #[serde(default = "default_dashboard_bind")]
+    pub bind: String,
+    #[serde(default)]
+    pub allow_live_mode_changes: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -146,6 +250,54 @@ pub struct TradingConfig {
 fn default_initial_capital() -> f64 {
     1000.0
 }
+fn default_runtime_environment() -> RuntimeEnvironment {
+    RuntimeEnvironment::Development
+}
+fn default_runtime_mode() -> RuntimeMode {
+    RuntimeMode::Paper
+}
+fn default_strategy_version() -> String {
+    STRATEGY_VERSION.to_string()
+}
+fn default_production_max_positions() -> usize {
+    1
+}
+fn default_production_max_order_usd() -> f64 {
+    0.10
+}
+fn default_max_daily_orders() -> usize {
+    3
+}
+fn default_max_daily_realized_loss_usd() -> f64 {
+    0.30
+}
+fn default_max_drawdown() -> f64 {
+    0.20
+}
+fn default_max_consecutive_losses() -> usize {
+    3
+}
+fn default_max_data_age_ms() -> u64 {
+    15_000
+}
+fn default_order_type() -> String {
+    "FOK".to_string()
+}
+fn default_heartbeat_interval_secs() -> u64 {
+    5
+}
+fn default_true() -> bool {
+    true
+}
+fn default_database_path() -> String {
+    "data/trading.db".to_string()
+}
+fn default_backup_directory() -> String {
+    "data/backups".to_string()
+}
+fn default_dashboard_bind() -> String {
+    "127.0.0.1:3001".to_string()
+}
 fn default_max_positions() -> usize {
     10
 }
@@ -204,10 +356,10 @@ fn default_max_position_pct() -> f64 {
     0.05
 }
 fn default_min_position_usd() -> f64 {
-    10.0
+    0.10
 }
 fn default_max_position_usd() -> f64 {
-    100.0
+    0.10
 }
 fn default_take_profit_pct() -> f64 {
     0.30
@@ -249,6 +401,11 @@ fn default_sort_by() -> String {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            runtime: RuntimeConfig::default(),
+            risk: RiskConfig::default(),
+            execution: ExecutionConfig::default(),
+            storage: StorageConfig::default(),
+            dashboard: DashboardConfig::default(),
             general: GeneralConfig::default(),
             api: ApiConfig::default(),
             orderbook: OrderBookConfig::default(),
@@ -261,6 +418,61 @@ impl Default for Config {
             paper_trading: PaperTradingConfig::default(),
             trading: TradingConfig::default(),
             crypto: CryptoConfig::default(),
+            source_path: None,
+        }
+    }
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            environment: default_runtime_environment(),
+            mode: default_runtime_mode(),
+            strategy_version: default_strategy_version(),
+        }
+    }
+}
+
+impl Default for RiskConfig {
+    fn default() -> Self {
+        Self {
+            max_open_positions: default_production_max_positions(),
+            max_order_usd: default_production_max_order_usd(),
+            max_daily_orders: default_max_daily_orders(),
+            max_daily_realized_loss_usd: default_max_daily_realized_loss_usd(),
+            max_drawdown: default_max_drawdown(),
+            max_consecutive_losses: default_max_consecutive_losses(),
+            max_spread: default_max_spread_pct(),
+            max_data_age_ms: default_max_data_age_ms(),
+        }
+    }
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            order_type: default_order_type(),
+            heartbeat_interval_secs: default_heartbeat_interval_secs(),
+            reconcile_before_ready: true,
+            cancel_on_shutdown: true,
+        }
+    }
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            database_path: default_database_path(),
+            backup_directory: default_backup_directory(),
+        }
+    }
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_dashboard_bind(),
+            allow_live_mode_changes: false,
         }
     }
 }
@@ -323,8 +535,8 @@ impl Default for PositionSizingConfig {
         Self {
             kelly_fraction: 0.125,
             max_position_pct: 0.05,
-            min_position_usd: 10.0,
-            max_position_usd: 100.0,
+            min_position_usd: 0.10,
+            max_position_usd: 0.10,
         }
     }
 }
@@ -415,7 +627,7 @@ impl Default for CryptoConfig {
 }
 
 impl Config {
-    pub fn load() -> anyhow::Result<Self> {
+    pub fn load() -> Result<Self> {
         dotenvy::dotenv().ok();
 
         // Production must select its config explicitly. Development keeps the
@@ -423,11 +635,15 @@ impl Config {
         let explicit_config = std::env::var("POLYMARKET_CONFIG").ok();
         let config_path = if let Some(explicit_path) = &explicit_config {
             Path::new(explicit_path).to_path_buf()
-        } else if let Ok(exe_path) = std::env::current_exe() {
-            let exe_dir = exe_path.parent().unwrap_or_else(|| Path::new("."));
-            exe_dir.join("config/default.toml")
+        } else if let Ok(current_dir) = std::env::current_dir() {
+            let current_dir_config = current_dir.join("config/default.toml");
+            if current_dir_config.exists() {
+                current_dir_config
+            } else {
+                executable_default_config()
+            }
         } else {
-            Path::new("config/default.toml").to_path_buf()
+            executable_default_config()
         };
 
         let config = if config_path.exists() {
@@ -443,7 +659,8 @@ impl Config {
         };
 
         // Apply env var overrides
-        let mut config = config;
+        let mut config: Self = config;
+        config.source_path = config_path.exists().then_some(config_path);
         if let Ok(val) = std::env::var("POLY_LOG_LEVEL") {
             config.general.log_level = val;
         }
@@ -451,6 +668,159 @@ impl Config {
             config.general.data_dir = val;
         }
 
+        config.validate(explicit_config.is_some())?;
         Ok(config)
+    }
+
+    pub fn validate(&self, explicit_config: bool) -> Result<()> {
+        if self.runtime.mode != RuntimeMode::Paper {
+            bail!(
+                "runtime mode '{}' is blocked: this build only implements paper execution",
+                self.runtime.mode
+            );
+        }
+        if self.runtime.strategy_version != STRATEGY_VERSION {
+            bail!(
+                "unknown strategy version '{}'; expected '{}'",
+                self.runtime.strategy_version,
+                STRATEGY_VERSION
+            );
+        }
+        if !self.paper_trading.enabled || !self.paper_trading.dry_run {
+            bail!("paper execution and dry_run must remain enabled in this build");
+        }
+        if self.risk.max_open_positions == 0
+            || self.risk.max_order_usd <= 0.0
+            || self.risk.max_daily_orders == 0
+            || self.risk.max_daily_realized_loss_usd <= 0.0
+            || self.risk.max_drawdown <= 0.0
+            || self.risk.max_consecutive_losses == 0
+            || self.risk.max_spread <= 0.0
+            || self.risk.max_data_age_ms == 0
+        {
+            bail!("risk limits must all be greater than zero");
+        }
+        if self.risk.max_order_usd > self.general.initial_capital {
+            bail!("risk.max_order_usd cannot exceed general.initial_capital");
+        }
+        if self.position_sizing.min_position_usd > self.risk.max_order_usd {
+            bail!("position_sizing.min_position_usd cannot exceed risk.max_order_usd");
+        }
+        if self.position_sizing.max_position_pct <= 0.0
+            || self.position_sizing.max_position_pct > 1.0
+            || self.expected_value.cost_per_trade_pct < 0.0
+        {
+            bail!("position sizing and fee configuration is invalid");
+        }
+        if self.storage.database_path.trim().is_empty()
+            || self.storage.backup_directory.trim().is_empty()
+        {
+            bail!("storage database and backup paths must not be empty");
+        }
+        if self.dashboard.allow_live_mode_changes {
+            bail!("dashboard.allow_live_mode_changes must remain false");
+        }
+
+        if self.runtime.environment == RuntimeEnvironment::Production {
+            if !explicit_config {
+                bail!("production requires an explicit POLYMARKET_CONFIG path");
+            }
+            if self.dashboard.bind != "127.0.0.1:3001" {
+                bail!("production dashboard must bind to 127.0.0.1:3001");
+            }
+            if self.risk.max_open_positions > 1
+                || self.risk.max_order_usd > 0.10
+                || self.risk.max_daily_orders > 3
+                || self.risk.max_daily_realized_loss_usd > 0.30
+                || self.risk.max_drawdown > 0.20
+                || self.risk.max_consecutive_losses > 3
+            {
+                bail!("production risk limits exceed the approved $2 canary limits");
+            }
+            if !self.execution.reconcile_before_ready || !self.execution.cancel_on_shutdown {
+                bail!("production requires reconciliation and cancel-on-shutdown");
+            }
+            if self.execution.heartbeat_interval_secs == 0 {
+                bail!("production heartbeat interval must be greater than zero");
+            }
+            if self.execution.order_type != "FOK" {
+                bail!("production execution.order_type must be FOK");
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn source_label(&self) -> String {
+        self.source_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "built-in defaults".to_string())
+    }
+
+    pub fn print_startup_summary(&self) {
+        tracing::info!(
+            runtime_mode = %self.runtime.mode,
+            environment = ?self.runtime.environment,
+            config = %self.source_label(),
+            database = %self.storage.database_path,
+            build_version = env!("CARGO_PKG_VERSION"),
+            strategy_version = %self.runtime.strategy_version,
+            "Startup configuration"
+        );
+    }
+}
+
+fn executable_default_config() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join("config/default.toml")))
+        .unwrap_or_else(|| Path::new("config/default.toml").to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_paper_only_and_valid() {
+        let config = Config::default();
+        assert_eq!(config.runtime.mode, RuntimeMode::Paper);
+        assert!(config.paper_trading.dry_run);
+        config.validate(false).unwrap();
+    }
+
+    #[test]
+    fn rejects_any_non_paper_mode() {
+        for mode in [
+            RuntimeMode::Shadow,
+            RuntimeMode::DrySigned,
+            RuntimeMode::Canary,
+            RuntimeMode::Live,
+        ] {
+            let mut config = Config::default();
+            config.runtime.mode = mode;
+            assert!(config.validate(false).is_err());
+        }
+    }
+
+    #[test]
+    fn production_requires_explicit_config_and_canary_limits() {
+        let mut config = Config::default();
+        config.runtime.environment = RuntimeEnvironment::Production;
+        assert!(config.validate(false).is_err());
+
+        config.risk.max_order_usd = 0.50;
+        assert!(config.validate(true).is_err());
+
+        config.risk.max_order_usd = 0.10;
+        assert!(config.validate(true).is_ok());
+    }
+
+    #[test]
+    fn rejects_dashboard_live_mode_changes() {
+        let mut config = Config::default();
+        config.dashboard.allow_live_mode_changes = true;
+        assert!(config.validate(false).is_err());
     }
 }

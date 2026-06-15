@@ -122,6 +122,8 @@ pub fn router() -> Router {
         // CLOB
         .route("/api/book", get(orderbook))
         .route("/api/price", get(price))
+        .route("/api/fee-rate", get(fee_rate))
+        .route("/api/time", get(server_time))
         .route("/api/prices-history", get(price_history))
         .with_state(state)
 }
@@ -250,6 +252,29 @@ async fn price(
     state
         .clob
         .fetch_price(&q.token_id, &q.side)
+        .await
+        .map_err(internal)
+        .and_then(json)
+}
+
+#[instrument(skip(state))]
+async fn fee_rate(
+    Query(q): Query<TokenQuery>,
+    State(state): State<AppState>,
+) -> AppResult<serde_json::Value> {
+    state
+        .clob
+        .fetch_fee_rate(&q.token_id)
+        .await
+        .map_err(internal)
+        .and_then(json)
+}
+
+#[instrument(skip(state))]
+async fn server_time(State(state): State<AppState>) -> AppResult<serde_json::Value> {
+    state
+        .clob
+        .fetch_server_time()
         .await
         .map_err(internal)
         .and_then(json)

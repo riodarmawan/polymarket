@@ -1,0 +1,20 @@
+[Unit]
+Description=Polymarket public market-data proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polymarket
+Group=polymarket
+WorkingDirectory=/opt/polymarket
+ExecStart=/opt/polymarket/target/release/polymarket-gamma
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

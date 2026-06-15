@@ -5,6 +5,9 @@
 The dashboard is production-observable but execution remains paper-only. This is
 intentional. No live order code may be enabled until every gate below passes.
 
+Implementation sequence, architecture changes, and acceptance criteria are
+defined in [PRODUCTION_IMPLEMENTATION_PLAN.md](PRODUCTION_IMPLEMENTATION_PLAN.md).
+
 The wallet private key, mnemonic, CLOB credentials, and relayer key previously
 shared in chat must be treated as compromised. Never fund or reuse them. Revoke
 the associated API keys and create a new signer.
@@ -52,6 +55,16 @@ For a $2 experiment, initially deposit only $2 pUSD. Keep a separate wallet for
 any larger funds.
 
 ## Mandatory Preflight
+
+Inspect implementation readiness first:
+
+```bash
+POLYMARKET_CONFIG=/absolute/path/to/config/production.toml \
+  ./target/release/polymarket-bot production-readiness
+```
+
+This report must continue to show live execution as `BLOCKED` until every
+implementation phase is complete.
 
 Run from the deployment host:
 
@@ -116,8 +129,10 @@ The live executor must implement all of these before it can be considered ready:
 ## Deployment
 
 - Run the Gamma proxy and dashboard as separate supervised services.
-- Bind dashboard and proxy to `127.0.0.1`; expose only through an authenticated
-  reverse proxy if remote access is required.
+- On a native Linux server, bind the dashboard to localhost or protect it with
+  an authenticated reverse proxy. The WSL/Codex desktop setup binds the
+  dashboard to `0.0.0.0:3001` so Windows localhost forwarding can reach it;
+  restrict port `3001` with the host firewall.
 - Use a dedicated non-root OS user.
 - Restrict the production secret file to mode `0600`.
 - Persist trade/audit state on durable storage.

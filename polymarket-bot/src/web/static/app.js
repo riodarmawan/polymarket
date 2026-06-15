@@ -81,6 +81,7 @@ function renderMarketGroup(containerId, markets) {
         const mins = Math.floor(remaining / 60);
         const secs = remaining % 60;
         const isLive = m.status === 'live';
+        const dataReady = m.data_status === 'ready';
         const isEnding = remaining <= 120;
         const countdown = `${mins}:${secs.toString().padStart(2, '0')}`;
         
@@ -102,7 +103,7 @@ function renderMarketGroup(containerId, markets) {
         const currentPrice = m.current_price > 0 ? `$${m.current_price.toFixed(2)}` : '-';
         
         return `
-            <div class="bg-gray-700 rounded p-3 ${isEnding ? 'border border-red-500' : ''}">
+            <div class="bg-gray-700 rounded p-3 ${isEnding ? 'border border-red-500' : ''} ${dataReady ? '' : 'border border-yellow-600'}">
                 <div class="flex justify-between items-center">
                     <div>
                         <span class="font-bold text-yellow-400 uppercase">${m.asset}</span>
@@ -127,9 +128,27 @@ function renderMarketGroup(containerId, markets) {
                     Current: ${currentPrice} |
                     Spread: ${(m.spread * 100).toFixed(1)}%
                 </div>
+                <div class="text-xs ${dataReady ? 'text-green-400' : 'text-yellow-400'} mt-1">
+                    Data: ${m.data_status || 'unknown'} · ${m.data_detail || ''}
+                </div>
             </div>
         `;
     }).join('');
+}
+
+async function refreshHealth() {
+    try {
+        const health = await (await fetch('/api/health')).json();
+        const el = document.getElementById('data-health');
+        el.textContent = `DATA ${health.overall.toUpperCase()} · markets ${health.markets.ready}/${health.markets.total}`;
+        el.className = health.overall === 'ready'
+            ? 'text-green-400 text-sm font-bold'
+            : 'text-yellow-400 text-sm font-bold';
+    } catch (err) {
+        const el = document.getElementById('data-health');
+        el.textContent = 'DATA UNAVAILABLE';
+        el.className = 'text-red-400 text-sm font-bold';
+    }
 }
 
 // Update trade display
@@ -163,7 +182,7 @@ function updateTrades(trades) {
         const color = t.status === 'open' ? 'yellow' : (pnl >= 0 ? 'green' : 'red');
         const result = t.status === 'open' ? 'OPEN' : `$${pnl.toFixed(2)}`;
         return `<div class="flex justify-between ${color}">
-            <span><b>${t.timeframe || '15m'}</b> · ${t.direction} @ ${t.entry_price.toFixed(2)} · edge ${(t.edge * 100).toFixed(1)}%</span>
+            <span><b>${t.timeframe || '15m'}</b> · ${t.direction} @ ${t.entry_price.toFixed(2)} · model margin ${(t.edge * 100).toFixed(1)}%</span>
             <span>${result}</span>
         </div>`;
     }).join('');
@@ -270,6 +289,7 @@ document.getElementById('export-trades').addEventListener('click', async () => {
 // Initialize
 connectWebSocket();
 loadInitialData();
+refreshHealth();
 
 // Keep countdown moving locally between API/WebSocket updates.
 setInterval(() => updateUpDownMarkets(updownMarkets), 1000);
@@ -284,3 +304,5 @@ setInterval(async () => {
         console.error('Failed to refresh updown markets:', err);
     }
 }, 10000);
+
+setInterval(refreshHealth, 5000);

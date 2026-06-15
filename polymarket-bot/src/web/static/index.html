@@ -22,8 +22,11 @@
         <!-- Header -->
         <div class="bg-gray-800 rounded-lg p-4 mb-4 flex justify-between items-center">
             <h1 class="text-xl font-bold cyan">LIVE TRADING DASHBOARD</h1>
-            <div class="text-green-400 font-bold">
-                Combined Paper Capital: $<span id="capital">4.00</span>
+            <div class="text-right">
+                <div id="data-health" class="text-yellow-400 text-sm font-bold">DATA STARTING</div>
+                <div class="text-green-400 font-bold">
+                    Combined Paper Capital: $<span id="capital">4.00</span>
+                </div>
             </div>
         </div>
 
@@ -114,7 +117,7 @@
                 <h2 class="text-sm text-gray-400 mb-2">RISK MANAGEMENT</h2>
                 <div class="space-y-2 text-sm">
                     <div class="flex justify-between">
-                        <span>Minimum Edge %:</span>
+                        <span>Minimum Model Margin %:</span>
                         <input id="setting-min-edge" type="number" value="10" step="1" class="bg-gray-700 rounded px-2 w-24">
                     </div>
                     <div class="flex justify-between">

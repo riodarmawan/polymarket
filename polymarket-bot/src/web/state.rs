@@ -1,9 +1,14 @@
+use crate::config::Config;
 use crate::crypto::binance_ws::Candle;
-use serde::Deserialize;
+use crate::storage::dashboard::{DashboardSnapshot, DashboardStore};
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     pub capital: f64,
     pub max_order: f64,
@@ -28,6 +33,59 @@ impl Default for Settings {
     }
 }
 
+impl Settings {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            capital: config.general.initial_capital,
+            max_order: config.risk.max_order_usd,
+            timeframe: "15m".to_string(),
+            auto_trade: true,
+            min_edge: config.expected_value.min_edge_pct.max(0.10),
+            max_entry_price: 0.60,
+            risk_fraction: config.position_sizing.max_position_pct,
+        }
+    }
+
+    pub fn respects(&self, runtime: &RuntimeInfo) -> bool {
+        self.capital.is_finite()
+            && self.capital > 0.0
+            && self.capital <= runtime.configured_initial_capital
+            && self.max_order.is_finite()
+            && self.max_order >= runtime.configured_min_order_usd
+            && self.max_order <= runtime.configured_max_order_usd
+            && self.risk_fraction.is_finite()
+            && self.risk_fraction > 0.0
+            && self.risk_fraction <= runtime.configured_max_risk_fraction
+            && self.min_edge.is_finite()
+            && self.min_edge >= runtime.configured_min_edge
+            && self.max_entry_price.is_finite()
+            && (0.0..=1.0).contains(&self.max_entry_price)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeInfo {
+    pub mode: String,
+    pub environment: String,
+    pub strategy_version: String,
+    pub build_version: String,
+    pub configured_max_order_usd: f64,
+    pub configured_min_order_usd: f64,
+    pub configured_initial_capital: f64,
+    pub configured_max_open_positions: usize,
+    pub configured_max_daily_orders: usize,
+    pub configured_max_spread: f64,
+    pub configured_max_daily_loss_usd: f64,
+    pub configured_max_drawdown: f64,
+    pub configured_max_consecutive_losses: usize,
+    pub configured_max_risk_fraction: f64,
+    pub configured_min_edge: f64,
+    pub configured_fee_pct: f64,
+    pub configured_max_data_age_ms: u64,
+    pub gamma_base_url: String,
+    pub clob_base_url: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct PriceData {
     pub price: f64,
@@ -47,7 +105,7 @@ impl Default for PriceData {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TradeInfo {
     pub timestamp: i64,
     pub market_slug: String,
@@ -66,7 +124,7 @@ pub struct TradeInfo {
     pub status: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StatsInfo {
     pub total_trades: usize,
     pub wins: usize,
@@ -132,6 +190,47 @@ pub struct UpDownMarket {
     pub status: String,
     pub price_to_beat: f64,
     pub current_price: f64,
+    pub captured_at_ms: i64,
+    pub data_status: DataStatus,
+    pub data_detail: String,
+    pub token_mapping_valid: bool,
+    pub tick_size: Option<f64>,
+    pub min_order_size: Option<f64>,
+    pub fee_rate_bps: Option<u64>,
+    pub negative_risk: Option<bool>,
+    pub up_executable_depth_usd: f64,
+    pub down_executable_depth_usd: f64,
+    pub up_expected_fill_price: Option<f64>,
+    pub down_expected_fill_price: Option<f64>,
+    pub clock_drift_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DataStatus {
+    Ready,
+    NotFound,
+    Timeout,
+    RateLimited,
+    InvalidPayload,
+    Stale,
+    Unavailable,
+    Incomplete,
+}
+
+impl DataStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NotFound => "not_found",
+            Self::Timeout => "timeout",
+            Self::RateLimited => "rate_limited",
+            Self::InvalidPayload => "invalid_payload",
+            Self::Stale => "stale",
+            Self::Unavailable => "unavailable",
+            Self::Incomplete => "incomplete",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +245,8 @@ pub struct SignalInfo {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub store: DashboardStore,
+    pub runtime: RuntimeInfo,
     pub price: Arc<RwLock<PriceData>>,
     pub settings: Arc<RwLock<Settings>>,
     pub trades: Arc<RwLock<Vec<TradeInfo>>>,
@@ -164,13 +265,28 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new() -> Self {
-        Self {
+    pub async fn new(config: &Config) -> Result<Self> {
+        let store = DashboardStore::open(Path::new(&config.storage.database_path)).await?;
+        let snapshot = store.load_snapshot().await?;
+        let restored = snapshot.is_some();
+        let snapshot = snapshot.unwrap_or_else(|| DashboardSnapshot {
+            settings: Settings::from_config(config),
+            trades: Vec::new(),
+            stats_15m: StatsInfo::with_capital(config.general.initial_capital),
+            stats_5m: StatsInfo::with_capital(config.general.initial_capital),
+        });
+        let runtime = RuntimeInfo::from_config(config);
+        if !snapshot.settings.respects(&runtime) {
+            anyhow::bail!("restored dashboard settings exceed the active configuration limits");
+        }
+        let state = Self {
+            store,
+            runtime,
             price: Arc::new(RwLock::new(PriceData::default())),
-            settings: Arc::new(RwLock::new(Settings::default())),
-            trades: Arc::new(RwLock::new(Vec::new())),
-            stats: Arc::new(RwLock::new(StatsInfo::default())),
-            stats_5m: Arc::new(RwLock::new(StatsInfo::default())),
+            settings: Arc::new(RwLock::new(snapshot.settings)),
+            trades: Arc::new(RwLock::new(snapshot.trades)),
+            stats: Arc::new(RwLock::new(snapshot.stats_15m)),
+            stats_5m: Arc::new(RwLock::new(snapshot.stats_5m)),
             markets: Arc::new(RwLock::new(Vec::new())),
             updown_markets: Arc::new(RwLock::new(Vec::new())),
             last_scan_at: Arc::new(RwLock::new(0)),
@@ -181,6 +297,185 @@ impl AppState {
             last_signal_5m_time: Arc::new(RwLock::new(0)),
             execution_note: Arc::new(RwLock::new("Waiting for a valid signal".to_string())),
             execution_note_5m: Arc::new(RwLock::new("Waiting for a valid 5m signal".to_string())),
+        };
+        state
+            .store
+            .audit_event(
+                "dashboard_started",
+                &state.runtime.mode,
+                &state.runtime.strategy_version,
+                json!({
+                    "restored": restored,
+                    "database_path": state.store.path().display().to_string()
+                }),
+            )
+            .await?;
+        Ok(state)
+    }
+
+    pub async fn persist(&self, event_type: &str, detail: serde_json::Value) -> Result<()> {
+        let snapshot = DashboardSnapshot {
+            settings: self.settings.read().await.clone(),
+            trades: self.trades.read().await.clone(),
+            stats_15m: self.stats.read().await.clone(),
+            stats_5m: self.stats_5m.read().await.clone(),
+        };
+        self.store
+            .save_snapshot(
+                &snapshot,
+                event_type,
+                &self.runtime.mode,
+                &self.runtime.strategy_version,
+                detail,
+            )
+            .await
+    }
+
+    pub async fn audit(&self, event_type: &str, detail: serde_json::Value) -> Result<()> {
+        self.store
+            .audit_event(
+                event_type,
+                &self.runtime.mode,
+                &self.runtime.strategy_version,
+                detail,
+            )
+            .await
+    }
+
+    pub async fn reserve_execution_intent(
+        &self,
+        market_slug: &str,
+        timeframe: &str,
+        detail: serde_json::Value,
+    ) -> Result<bool> {
+        self.store
+            .reserve_execution_intent(
+                market_slug,
+                market_slug,
+                timeframe,
+                &self.runtime.mode,
+                &self.runtime.strategy_version,
+                detail,
+            )
+            .await
+    }
+
+    pub async fn halt_after_persistence_failure(&self, context: &str, error: &anyhow::Error) {
+        self.settings.write().await.auto_trade = false;
+        tracing::error!(
+            "Persistence failure halted auto-trade during {}: {}",
+            context,
+            error
+        );
+    }
+}
+
+impl RuntimeInfo {
+    pub(crate) fn from_config(config: &Config) -> Self {
+        Self {
+            mode: config.runtime.mode.to_string(),
+            environment: format!("{:?}", config.runtime.environment).to_lowercase(),
+            strategy_version: config.runtime.strategy_version.clone(),
+            build_version: env!("CARGO_PKG_VERSION").to_string(),
+            configured_max_order_usd: config.risk.max_order_usd,
+            configured_min_order_usd: config.position_sizing.min_position_usd,
+            configured_initial_capital: config.general.initial_capital,
+            configured_max_open_positions: config.risk.max_open_positions,
+            configured_max_daily_orders: config.risk.max_daily_orders,
+            configured_max_spread: config.risk.max_spread,
+            configured_max_daily_loss_usd: config.risk.max_daily_realized_loss_usd,
+            configured_max_drawdown: config.risk.max_drawdown,
+            configured_max_consecutive_losses: config.risk.max_consecutive_losses,
+            configured_max_risk_fraction: config.position_sizing.max_position_pct,
+            configured_min_edge: config.expected_value.min_edge_pct.max(0.10),
+            configured_fee_pct: config.expected_value.cost_per_trade_pct,
+            configured_max_data_age_ms: config.risk.max_data_age_ms,
+            gamma_base_url: config.api.gamma_base_url.clone(),
+            clob_base_url: config.api.clob_base_url.clone(),
         }
+    }
+}
+
+impl StatsInfo {
+    fn with_capital(capital: f64) -> Self {
+        Self {
+            current_capital: capital,
+            peak_capital: capital,
+            ..Self::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn rejects_settings_above_configured_order_ceiling() {
+        let config = Config::default();
+        let runtime = RuntimeInfo::from_config(&config);
+        let mut settings = Settings::from_config(&config);
+        assert!(settings.respects(&runtime));
+
+        settings.max_order = runtime.configured_max_order_usd + 0.01;
+        assert!(!settings.respects(&runtime));
+    }
+
+    #[tokio::test]
+    async fn restores_dashboard_state_after_restart() {
+        let temp = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.storage.database_path = temp.path().join("state.db").display().to_string();
+
+        let state = AppState::new(&config).await.unwrap();
+        state.trades.write().await.push(TradeInfo {
+            timestamp: 1,
+            market_slug: "btc-updown-restart-test".to_string(),
+            timeframe: "15m".to_string(),
+            direction: "Down".to_string(),
+            entry_price: 0.40,
+            exit_price: None,
+            shares: 0.25,
+            size_usd: 0.10,
+            fee_usd: 0.002,
+            price_to_beat: 100.0,
+            end_ts: 2,
+            confidence: 0.70,
+            edge: 0.30,
+            pnl: None,
+            status: "open".to_string(),
+        });
+        state.trades.write().await.push(TradeInfo {
+            timestamp: 0,
+            market_slug: "btc-updown-settled-restart-test".to_string(),
+            timeframe: "5m".to_string(),
+            direction: "Up".to_string(),
+            entry_price: 0.50,
+            exit_price: Some(1.0),
+            shares: 0.20,
+            size_usd: 0.10,
+            fee_usd: 0.002,
+            price_to_beat: 100.0,
+            end_ts: 1,
+            confidence: 0.70,
+            edge: 0.20,
+            pnl: Some(0.098),
+            status: "settled".to_string(),
+        });
+        state.stats.write().await.current_capital = 1.898;
+        state.stats_5m.write().await.total_pnl = 0.098;
+        state
+            .persist("restart_test", serde_json::json!({"step": "before_restart"}))
+            .await
+            .unwrap();
+        drop(state);
+
+        let restored = AppState::new(&config).await.unwrap();
+        assert_eq!(restored.trades.read().await.len(), 2);
+        assert_eq!(restored.stats.read().await.current_capital, 1.898);
+        assert_eq!(restored.trades.read().await[0].status, "open");
+        assert_eq!(restored.trades.read().await[1].status, "settled");
+        assert_eq!(restored.stats_5m.read().await.total_pnl, 0.098);
     }
 }

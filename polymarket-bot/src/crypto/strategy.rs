@@ -1,6 +1,7 @@
 use crate::crypto::signals::Direction;
 
-const FIVE_MINUTE_OPENING_Z_THRESHOLD: f64 = 0.90;
+const FIFTEEN_MINUTE_STRENGTH_THRESHOLD: f64 = 1.50;
+const FIVE_MINUTE_OPENING_Z_THRESHOLD: f64 = 1.50;
 
 #[derive(Debug, Clone)]
 pub struct EarlyWindowSignal {
@@ -52,9 +53,13 @@ pub fn predict_window(prices: &[f64], window_minutes: usize) -> Option<EarlyWind
         / returns.len() as f64;
     let volatility = variance.sqrt().max(0.000_05);
 
-    let strength =
-        (short_momentum.abs() + medium_momentum.abs()) / (volatility * strength_divisor);
-    if strength < 0.55 {
+    let strength = (short_momentum.abs() + medium_momentum.abs()) / (volatility * strength_divisor);
+    let minimum_strength = if window_minutes <= 5 {
+        0.55
+    } else {
+        FIFTEEN_MINUTE_STRENGTH_THRESHOLD
+    };
+    if strength < minimum_strength {
         return None;
     }
 
@@ -212,8 +217,7 @@ pub fn estimate_historical_ask(
 
     let displacement = (current_price - window_open) / window_open;
     let scale = volatility * (minutes_remaining.max(1) as f64).sqrt();
-    let up_probability = (0.5 + 0.18 * (displacement / scale).clamp(-2.0, 2.0))
-        .clamp(0.12, 0.88);
+    let up_probability = (0.5 + 0.18 * (displacement / scale).clamp(-2.0, 2.0)).clamp(0.12, 0.88);
     let side_probability = match direction {
         Direction::Up => up_probability,
         Direction::Down => 1.0 - up_probability,
@@ -237,8 +241,7 @@ mod tests {
     #[test]
     fn skips_conflicting_momentum() {
         let prices = vec![
-            100.0, 100.2, 100.4, 100.6, 100.8, 101.0, 101.2, 101.4, 101.6, 101.8, 102.0,
-            101.0,
+            100.0, 100.2, 100.4, 100.6, 100.8, 101.0, 101.2, 101.4, 101.6, 101.8, 102.0, 101.0,
         ];
         assert!(predict_early_window(&prices).is_none());
     }
@@ -252,9 +255,7 @@ mod tests {
 
     #[test]
     fn predicts_five_minute_continuation_in_strong_regime() {
-        let mut prices: Vec<f64> = (0..30)
-            .map(|index| 100.0 + index as f64 * 0.02)
-            .collect();
+        let mut prices: Vec<f64> = (0..30).map(|index| 100.0 + index as f64 * 0.02).collect();
         let window_open = *prices.last().expect("price");
         prices.push(window_open + 0.35);
         let signal =
@@ -264,11 +265,9 @@ mod tests {
 
     #[test]
     fn diagnoses_weak_five_minute_opening_move() {
-        let mut prices: Vec<f64> = (0..30)
-            .map(|index| 100.0 + index as f64 * 0.02)
-            .collect();
+        let mut prices: Vec<f64> = (0..30).map(|index| 100.0 + index as f64 * 0.02).collect();
         let window_open = *prices.last().expect("price");
         prices.push(window_open + 0.001);
-        assert!(diagnose_five_minute_continuation(&prices, window_open).contains("below 0.90z"));
+        assert!(diagnose_five_minute_continuation(&prices, window_open).contains("below 1.50z"));
     }
 }

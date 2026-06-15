@@ -1,7 +1,7 @@
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tungstenite::connect;
-use serde::{Deserialize, Serialize};
-use anyhow::Result;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct KlineEvent {
@@ -104,11 +104,11 @@ impl BinanceWsClient {
 
     pub fn start(&self) -> Result<()> {
         let tx = self.tx.clone();
-        
+
         std::thread::spawn(move || -> Result<()> {
             let url = "wss://stream.binance.com:9443/ws/btcusdt@kline_1m";
             let (mut socket, _) = connect(url)?;
-            
+
             loop {
                 let msg = socket.read_message()?;
                 if let tungstenite::Message::Text(text) = msg {
@@ -119,7 +119,7 @@ impl BinanceWsClient {
                 }
             }
         });
-        
+
         Ok(())
     }
 }
@@ -134,7 +134,7 @@ impl BinanceRestClient {
             base_url: "https://api.binance.com".to_string(),
         }
     }
-    
+
     pub async fn fetch_candles(
         &self,
         symbol: &str,
@@ -145,14 +145,16 @@ impl BinanceRestClient {
             "{}/api/v3/klines?symbol={}&interval={}&limit={}",
             self.base_url, symbol, interval, limit
         );
-        
-        let client = reqwest::Client::new();
-        let response = client.get(&url).send().await?;
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()?;
+        let response = client.get(&url).send().await?.error_for_status()?;
         let candles: Vec<BinanceCandleResponse> = response.json().await?;
-        
+
         Ok(candles.into_iter().map(|c| c.into()).collect())
     }
-    
+
     pub async fn fetch_candles_since(
         &self,
         symbol: &str,
@@ -164,15 +166,17 @@ impl BinanceRestClient {
             "{}/api/v3/klines?symbol={}&interval={}&startTime={}",
             self.base_url, symbol, interval, start_time
         );
-        
+
         if let Some(end) = end_time {
             url.push_str(&format!("&endTime={}", end));
         }
-        
-        let client = reqwest::Client::new();
-        let response = client.get(&url).send().await?;
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()?;
+        let response = client.get(&url).send().await?.error_for_status()?;
         let candles: Vec<BinanceCandleResponse> = response.json().await?;
-        
+
         Ok(candles.into_iter().map(|c| c.into()).collect())
     }
 
@@ -237,8 +241,15 @@ impl BinanceRestClient {
         let url = format!(
             "https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
         );
-        let rows: Vec<Vec<serde_json::Value>> =
-            reqwest::Client::new().get(&url).send().await?.json().await?;
+        let rows: Vec<Vec<serde_json::Value>> = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()?
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
 
         Ok(rows
             .iter()

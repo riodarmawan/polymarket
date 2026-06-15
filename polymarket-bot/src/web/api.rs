@@ -1,6 +1,7 @@
 use crate::web::state::AppState;
 use crate::web::state::Settings;
 use axum::extract::{Json, State};
+use axum::http::StatusCode;
 use serde_json::{json, Value};
 
 pub async fn get_price(State(state): State<AppState>) -> axum::Json<Value> {
@@ -40,6 +41,12 @@ pub async fn get_updown_markets(State(state): State<AppState>) -> axum::Json<Val
     let updown_json: Vec<Value> = updown
         .iter()
         .map(|m| {
+            let age_ms = chrono::Utc::now().timestamp_millis() - m.captured_at_ms;
+            let data_status = if age_ms > state.runtime.configured_max_data_age_ms as i64 {
+                "stale"
+            } else {
+                m.data_status.as_str()
+            };
             json!({
                 "asset": m.asset,
                 "slug": m.slug,
@@ -55,10 +62,81 @@ pub async fn get_updown_markets(State(state): State<AppState>) -> axum::Json<Val
                 "spread": m.spread,
                 "price_to_beat": m.price_to_beat,
                 "current_price": m.current_price
+                ,"captured_at_ms": m.captured_at_ms
+                ,"data_age_ms": age_ms
+                ,"data_status": data_status
+                ,"data_detail": m.data_detail
+                ,"token_mapping_valid": m.token_mapping_valid
+                ,"tick_size": m.tick_size
+                ,"min_order_size": m.min_order_size
+                ,"fee_rate_bps": m.fee_rate_bps
+                ,"negative_risk": m.negative_risk
+                ,"up_executable_depth_usd": m.up_executable_depth_usd
+                ,"down_executable_depth_usd": m.down_executable_depth_usd
+                ,"up_expected_fill_price": m.up_expected_fill_price
+                ,"down_expected_fill_price": m.down_expected_fill_price
+                ,"clock_drift_ms": m.clock_drift_ms
             })
         })
         .collect();
     axum::Json(json!({ "markets": updown_json }))
+}
+
+pub async fn get_health(State(state): State<AppState>) -> axum::Json<Value> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let price = state.price.read().await;
+    let scanner_at = *state.last_scan_at.read().await;
+    let markets = state.updown_markets.read().await;
+    let ready_markets = markets
+        .iter()
+        .filter(|market| {
+            market.data_status == crate::web::state::DataStatus::Ready
+                && now - market.captured_at_ms <= state.runtime.configured_max_data_age_ms as i64
+        })
+        .count();
+    let stale_markets = markets
+        .iter()
+        .filter(|market| now - market.captured_at_ms > state.runtime.configured_max_data_age_ms as i64)
+        .count();
+    let price_ready = price.source == "live"
+        && now - price.timestamp <= state.runtime.configured_max_data_age_ms as i64;
+    let scanner_ready =
+        scanner_at > 0 && now - scanner_at <= state.runtime.configured_max_data_age_ms as i64;
+    let overall = if price_ready && scanner_ready && ready_markets > 0 {
+        "ready"
+    } else if scanner_at == 0 || markets.is_empty() {
+        "starting"
+    } else {
+        "degraded"
+    };
+
+    axum::Json(json!({
+        "overall": overall,
+        "max_data_age_ms": state.runtime.configured_max_data_age_ms,
+        "price": {
+            "status": if price_ready { "ready" } else { "stale_or_unavailable" },
+            "source": price.source,
+            "age_ms": now - price.timestamp
+        },
+        "scanner": {
+            "status": if scanner_ready { "ready" } else { "stale_or_unavailable" },
+            "age_ms": if scanner_at > 0 { now - scanner_at } else { -1 }
+        },
+        "clob_clock": {
+            "status": if markets.iter().any(|market| market.clock_drift_ms.map(|drift| drift.abs() <= 5_000).unwrap_or(false)) {
+                "ready"
+            } else {
+                "unavailable_or_drifted"
+            },
+            "max_observed_drift_ms": markets.iter().filter_map(|market| market.clock_drift_ms).map(i64::abs).max()
+        },
+        "markets": {
+            "ready": ready_markets,
+            "stale": stale_markets,
+            "total": markets.len()
+        },
+        "database": {"status": "ready"}
+    }))
 }
 
 pub async fn get_signals(State(state): State<AppState>) -> axum::Json<Value> {
@@ -73,8 +151,10 @@ pub async fn get_signals(State(state): State<AppState>) -> axum::Json<Value> {
             "timeframe": s.timeframe,
             "reason": s.reason,
             "execution_note": *execution_note,
-            "timestamp": s.timestamp
-            ,"window_start_ts": s.window_start_ts
+            "timestamp": s.timestamp,
+            "window_start_ts": s.window_start_ts,
+            "runtime_mode": state.runtime.mode,
+            "strategy_version": state.runtime.strategy_version
         }),
         None => json!(null),
     };
@@ -85,8 +165,10 @@ pub async fn get_signals(State(state): State<AppState>) -> axum::Json<Value> {
             "timeframe": s.timeframe,
             "reason": s.reason,
             "execution_note": *execution_note_5m,
-            "timestamp": s.timestamp
-            ,"window_start_ts": s.window_start_ts
+            "timestamp": s.timestamp,
+            "window_start_ts": s.window_start_ts,
+            "runtime_mode": state.runtime.mode,
+            "strategy_version": state.runtime.strategy_version
         }),
         None => json!(null),
     };
@@ -113,7 +195,9 @@ pub async fn get_trades(State(state): State<AppState>) -> axum::Json<Value> {
                 "confidence": t.confidence,
                 "edge": t.edge,
                 "pnl": t.pnl,
-                "status": t.status
+                "status": t.status,
+                "runtime_mode": state.runtime.mode,
+                "strategy_version": state.runtime.strategy_version
             })
         })
         .collect();
@@ -154,22 +238,60 @@ pub async fn get_settings(State(state): State<AppState>) -> axum::Json<Value> {
         "auto_trade": settings.auto_trade,
         "min_edge": settings.min_edge,
         "max_entry_price": settings.max_entry_price,
-        "risk_fraction": settings.risk_fraction
+        "risk_fraction": settings.risk_fraction,
+        "runtime_mode": state.runtime.mode,
+        "runtime_environment": state.runtime.environment,
+        "strategy_version": state.runtime.strategy_version,
+        "build_version": state.runtime.build_version,
+        "configured_max_order_usd": state.runtime.configured_max_order_usd
     }))
 }
 
 pub async fn update_settings(
     State(state): State<AppState>,
     Json(settings): Json<Settings>,
-) -> axum::Json<Value> {
+) -> (StatusCode, axum::Json<Value>) {
+    if !settings.respects(&state.runtime) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "status": "rejected",
+                "reason": "settings exceed configured capital or risk limits"
+            })),
+        );
+    }
+
     *state.settings.write().await = settings.clone();
     if state.trades.read().await.is_empty() {
-        let mut stats = state.stats.write().await;
-        stats.current_capital = settings.capital;
-        stats.peak_capital = settings.capital;
-        let mut stats_5m = state.stats_5m.write().await;
-        stats_5m.current_capital = settings.capital;
-        stats_5m.peak_capital = settings.capital;
+        {
+            let mut stats = state.stats.write().await;
+            stats.current_capital = settings.capital;
+            stats.peak_capital = settings.capital;
+        }
+        {
+            let mut stats_5m = state.stats_5m.write().await;
+            stats_5m.current_capital = settings.capital;
+            stats_5m.peak_capital = settings.capital;
+        }
     }
-    axum::Json(json!({ "status": "ok" }))
+    if let Err(error) = state
+        .persist(
+            "settings_updated",
+            json!({
+                "capital": settings.capital,
+                "max_order": settings.max_order,
+                "auto_trade": settings.auto_trade
+            }),
+        )
+        .await
+    {
+        state
+            .halt_after_persistence_failure("settings update", &error)
+            .await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({"status": "error", "reason": "persistence failed"})),
+        );
+    }
+    (StatusCode::OK, axum::Json(json!({ "status": "ok" })))
 }

@@ -1,7 +1,56 @@
+use crate::config::{Config, RuntimeEnvironment, RuntimeMode};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 const LIVE_CONFIRMATION: &str = "I_UNDERSTAND_LIVE_TRADING";
+
+pub fn print_readiness(config: &Config) {
+    println!("Polymarket production readiness");
+    println!("  Build version:    {}", env!("CARGO_PKG_VERSION"));
+    println!("  Strategy version: {}", config.runtime.strategy_version);
+    println!("  Runtime mode:     {}", config.runtime.mode);
+    println!("  Config source:    {}", config.source_label());
+    println!("  Database path:    {}", config.storage.database_path);
+    println!();
+
+    readiness_check(
+        config.runtime.mode == RuntimeMode::Paper,
+        "Phase 0 runtime remains paper-only",
+    );
+    readiness_check(
+        !config.dashboard.allow_live_mode_changes,
+        "Phase 0 dashboard cannot enable live mode",
+    );
+    readiness_check(
+        true,
+        "Phase 1A durable dashboard state, audit log, backups, and intent uniqueness",
+    );
+    readiness_check(
+        true,
+        "Phase 1B normalized paper trades, capital ledger, and daily risk state",
+    );
+    readiness_check(
+        true,
+        "Phase 1C normalized market windows and orderbook snapshots",
+    );
+    readiness_check(
+        true,
+        "Phase 2 market freshness, outcome mapping, depth, fees, metadata, and clock checks",
+    );
+    readiness_check(false, "Phase 3 unified intent and central risk engine");
+    readiness_check(false, "Phase 4 forward-test promotion metrics");
+    readiness_check(false, "Phase 5 CLOB V2 dry-signed executor");
+    readiness_check(false, "Phase 6 live order lifecycle");
+    readiness_check(false, "Phase 7 startup reconciliation and recovery");
+    readiness_check(false, "Phase 8 production deployment and observability");
+    readiness_check(false, "Phase 9 manually approved canary");
+    println!();
+    println!("BLOCKED: live execution is intentionally unavailable.");
+}
+
+fn readiness_check(ok: bool, label: &str) {
+    println!("[{}] {}", if ok { "OK" } else { "PENDING" }, label);
+}
 
 #[derive(Debug, Deserialize)]
 struct GeoblockResponse {
@@ -10,8 +59,11 @@ struct GeoblockResponse {
     region: String,
 }
 
-pub async fn run_preflight() -> Result<()> {
+pub async fn run_preflight(config: &Config) -> Result<()> {
     println!("Polymarket production preflight (no orders will be placed)");
+    if config.runtime.environment != RuntimeEnvironment::Production {
+        bail!("production-check requires an explicit production configuration");
+    }
     let mut failures = Vec::new();
 
     check_secret("POLYMARKET_PRIVATE_KEY", true, &mut failures);
@@ -65,17 +117,26 @@ pub async fn run_preflight() -> Result<()> {
         .await
         .map(|response| response.status().is_success())
         .unwrap_or(false);
-    print_check(clob_ok, "CLOB V2 production endpoint", "https://clob.polymarket.com");
+    print_check(
+        clob_ok,
+        "CLOB V2 production endpoint",
+        "https://clob.polymarket.com",
+    );
     if !clob_ok {
         failures.push("CLOB V2 production endpoint unavailable".to_string());
     }
 
     println!();
     if failures.is_empty() {
-        println!("READY: prerequisites are present. Live order execution is still not implemented.");
+        println!(
+            "READY: prerequisites are present. Live order execution is still not implemented."
+        );
         Ok(())
     } else {
-        println!("BLOCKED: {} production prerequisite(s) failed:", failures.len());
+        println!(
+            "BLOCKED: {} production prerequisite(s) failed:",
+            failures.len()
+        );
         for failure in failures {
             println!("  - {failure}");
         }
@@ -88,7 +149,9 @@ fn check_secret(name: &str, private_key: bool, failures: &mut Vec<String>) {
     let valid = if private_key {
         value
             .strip_prefix("0x")
-            .map(|key| key.len() == 64 && key.chars().all(|character| character.is_ascii_hexdigit()))
+            .map(|key| {
+                key.len() == 64 && key.chars().all(|character| character.is_ascii_hexdigit())
+            })
             .unwrap_or(false)
     } else {
         !value.trim().is_empty() && !value.contains("replace_me")
@@ -104,7 +167,10 @@ fn check_address(name: &str, failures: &mut Vec<String>) {
     let valid = value
         .strip_prefix("0x")
         .map(|address| {
-            address.len() == 40 && address.chars().all(|character| character.is_ascii_hexdigit())
+            address.len() == 40
+                && address
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
         })
         .unwrap_or(false);
     print_check(valid, name, "Ethereum address format");

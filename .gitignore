@@ -8,5 +8,7 @@ CREDENTIALS.md
 /.playwright-mcp/
 /.claude/settings.local.json
 /data/*.db
+/polymarket-bot/data/
+/polymarket-bot/data-production/
 __pycache__/
 *.py[cod]

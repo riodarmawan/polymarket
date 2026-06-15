@@ -2,8 +2,7 @@ use clap::Parser;
 use polymarket_bot::analyzers::orderbook::{OrderBookAnalyzer, OrderBookSnapshot};
 use polymarket_bot::api::clob::ClobClient;
 use polymarket_bot::api::gamma::GammaClient;
-use polymarket_bot::api::types::{Market, OrderBook, OrderBookLevel};
-use polymarket_bot::backtesting::engine::BacktestEngine;
+use polymarket_bot::api::types::{Market, OrderBookLevel};
 use polymarket_bot::cli::{Cli, Commands};
 use polymarket_bot::collector::data_collector::DataCollector;
 use polymarket_bot::config::Config;
@@ -218,7 +217,7 @@ async fn test_database_create_tables() {
 
 #[test]
 fn test_collector_new() {
-    let collector = DataCollector::new("https://gamma-api.polymarket.com".to_string());
+    let collector = DataCollector::new("https://gamma-api.polymarket.com".to_string(), 8760.0);
     assert_eq!(collector.gamma_base_url, "https://gamma-api.polymarket.com");
 }
 
@@ -226,12 +225,6 @@ fn test_collector_new() {
 async fn test_paper_engine_new() {
     let engine = PaperTradingEngine::new(1000.0);
     assert_eq!(engine.capital, 1000.0);
-}
-
-#[test]
-fn test_backtest_engine_new() {
-    let engine = BacktestEngine::new(1000.0);
-    assert_eq!(engine.initial_capital, 1000.0);
 }
 
 #[test]

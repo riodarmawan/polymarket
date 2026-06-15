@@ -164,6 +164,22 @@ impl ClobClient {
         let resp = self.http.get(&url).send().await?.error_for_status()?;
         Ok(resp.json().await?)
     }
+
+    #[instrument(skip(self))]
+    pub async fn fetch_fee_rate(&self, token_id: &str) -> color_eyre::Result<serde_json::Value> {
+        let url = format!("https://clob.polymarket.com/fee-rate?token_id={token_id}");
+        tracing::debug!(%url, "fetching fee rate from CLOB");
+        let resp = self.http.get(&url).send().await?.error_for_status()?;
+        Ok(resp.json().await?)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn fetch_server_time(&self) -> color_eyre::Result<serde_json::Value> {
+        let url = "https://clob.polymarket.com/time";
+        tracing::debug!(%url, "fetching server time from CLOB");
+        let resp = self.http.get(url).send().await?.error_for_status()?;
+        Ok(resp.json().await?)
+    }
 }
 
 impl Default for ClobClient {

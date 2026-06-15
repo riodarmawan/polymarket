@@ -11,3 +11,4 @@ pub mod error;
 pub mod models;
 pub mod paper_trading;
 pub mod storage;
+pub mod web;

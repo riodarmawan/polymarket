@@ -34,8 +34,9 @@ polymarket dashboard
 2. Run `polymarket config show` to verify
 
 Production secrets must not be stored in the repository. See
-`../docs/PRODUCTION_RUNBOOK.md` and run `polymarket-bot production-check`
-before any live-execution implementation is enabled.
+`../docs/PRODUCTION_INSTALL.md` for the production-paper fast path and
+`../docs/PRODUCTION_RUNBOOK.md` before any live-execution implementation is
+enabled.
 
 ## Development
 

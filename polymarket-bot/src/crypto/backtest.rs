@@ -1,9 +1,7 @@
 use crate::crypto::binance_ws::{BinanceRestClient, Candle};
 use crate::crypto::indicators::Timeframe;
 use crate::crypto::signals::Direction;
-use crate::crypto::strategy::{
-    estimate_historical_ask, predict_five_minute_continuation, predict_window,
-};
+use crate::crypto::strategy::{predict_five_minute_continuation, predict_window};
 use std::path::Path;
 
 const CACHE_PATH: &str = "/home/kucingsakti/polymarket/.playwright-mcp/btc_1m_30d.json";
@@ -20,6 +18,8 @@ pub struct CryptoBacktestConfig {
     pub min_edge: f64,
     pub entry_minute: usize,
     pub source_interval_minutes: u32,
+    pub target_start_ts: Option<i64>,
+    pub target_end_ts: Option<i64>,
 }
 
 impl Default for CryptoBacktestConfig {
@@ -35,6 +35,8 @@ impl Default for CryptoBacktestConfig {
             min_edge: 0.10,
             entry_minute: 3,
             source_interval_minutes: 1,
+            target_start_ts: None,
+            target_end_ts: None,
         }
     }
 }
@@ -67,7 +69,22 @@ pub struct CryptoBacktestResult {
     pub avg_loss: f64,
     pub profit_factor: f64,
     pub max_drawdown: f64,
+    pub diagnostics: ModelDiagnostics,
     pub trades: Vec<CryptoTrade>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelDiagnostics {
+    pub raw_signals: usize,
+    pub raw_correct: usize,
+    pub raw_accuracy: f64,
+    pub average_confidence: f64,
+    pub calibration_gap: f64,
+    pub brier_score: f64,
+    pub first_half_signals: usize,
+    pub first_half_accuracy: f64,
+    pub second_half_signals: usize,
+    pub second_half_accuracy: f64,
 }
 
 pub struct CryptoBacktestEngine {
@@ -86,7 +103,9 @@ impl CryptoBacktestEngine {
         config: &CryptoBacktestConfig,
         days: u32,
     ) -> Result<CryptoBacktestResult, anyhow::Error> {
-        let candles = self.load_one_minute_candles(days).await?;
+        let mut candles = self.load_one_minute_candles(days).await?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        candles.retain(|candle| candle.timestamp + 60_000 <= now_ms);
         if candles.len() < 120 {
             anyhow::bail!("not enough 1-minute candles for a realistic backtest");
         }
@@ -95,8 +114,17 @@ impl CryptoBacktestEngine {
         let mut peak_capital = capital;
         let mut max_drawdown: f64 = 0.0;
         let mut trades = Vec::new();
+        let mut diagnostics = ModelDiagnostics::default();
+        let mut confidence_sum = 0.0;
+        let mut brier_sum = 0.0;
+        let mut first_half_correct = 0usize;
+        let mut second_half_correct = 0usize;
         let mut consecutive_m5_losses = 0usize;
         let mut m5_pause_until = 0i64;
+        let midpoint_ts = match (config.target_start_ts, config.target_end_ts) {
+            (Some(start), Some(end)) => start + (end - start) / 2,
+            _ => candles[candles.len() / 2].timestamp,
+        };
 
         for timeframe in &config.timeframes {
             let window_minutes = timeframe.candle_count();
@@ -126,13 +154,23 @@ impl CryptoBacktestEngine {
                 if window.len() < window_minutes {
                     continue;
                 }
+                if config
+                    .target_start_ts
+                    .is_some_and(|start| window[0].timestamp < start)
+                    || config
+                        .target_end_ts
+                        .is_some_and(|end| window[0].timestamp >= end)
+                {
+                    continue;
+                }
 
                 let global_start = first_aligned + window_index * window_minutes;
                 let entry_index = global_start + entry_minute - 1;
                 if entry_index < 60 || entry_index >= candles.len() {
                     continue;
                 }
-                if *timeframe == Timeframe::M5 && window[entry_minute - 1].timestamp < m5_pause_until
+                if *timeframe == Timeframe::M5
+                    && window[entry_minute - 1].timestamp < m5_pause_until
                 {
                     continue;
                 }
@@ -154,37 +192,32 @@ impl CryptoBacktestEngine {
 
                 let entry_btc_price = window[entry_minute - 1].close;
                 let final_btc_price = window[window_minutes - 1].close;
-                let recent_start = available_prices.len().saturating_sub(20);
-                let ask = estimate_historical_ask(
-                    &signal.direction,
-                    window_open,
-                    entry_btc_price,
-                    &available_prices[recent_start..],
-                    window_minutes - entry_minute,
-                );
-                let edge = signal.confidence - ask;
+                let window_went_up = final_btc_price >= window_open;
+                let signal_won = match signal.direction {
+                    Direction::Up => window_went_up,
+                    Direction::Down => !window_went_up,
+                };
+                diagnostics.raw_signals += 1;
+                diagnostics.raw_correct += usize::from(signal_won);
+                confidence_sum += signal.confidence;
+                brier_sum += (signal.confidence - if signal_won { 1.0 } else { 0.0 }).powi(2);
+                if window[entry_minute - 1].timestamp < midpoint_ts {
+                    diagnostics.first_half_signals += 1;
+                    first_half_correct += usize::from(signal_won);
+                } else {
+                    diagnostics.second_half_signals += 1;
+                    second_half_correct += usize::from(signal_won);
+                }
 
-                let max_entry_price = if *timeframe == Timeframe::M5 {
+                // Historical candles do not include Polymarket orderbooks. Use
+                // the worst allowed fill for every signal instead of selecting
+                // trades with synthetic odds derived from the same BTC move.
+                let ask = if *timeframe == Timeframe::M5 {
                     0.62
                 } else {
                     config.max_entry_price
                 };
-                let min_edge = if *timeframe == Timeframe::M5 {
-                    0.08
-                } else {
-                    config.min_edge
-                };
-                let min_entry_price = if *timeframe == Timeframe::M15 {
-                    0.50
-                } else {
-                    config.min_entry_price
-                };
-                if ask < min_entry_price
-                    || ask > max_entry_price
-                    || edge < min_edge
-                {
-                    continue;
-                }
+                let edge = signal.confidence - ask;
 
                 let current_drawdown = if peak_capital > 0.0 {
                     (peak_capital - capital) / peak_capital
@@ -220,11 +253,7 @@ impl CryptoBacktestEngine {
                     continue;
                 }
 
-                let window_went_up = final_btc_price >= window_open;
-                let won = match signal.direction {
-                    Direction::Up => window_went_up,
-                    Direction::Down => !window_went_up,
-                };
+                let won = signal_won;
                 let fee = size_usd * config.fee_pct;
                 let shares = size_usd / ask;
                 let pnl = if won {
@@ -259,8 +288,7 @@ impl CryptoBacktestEngine {
                     } else {
                         consecutive_m5_losses += 1;
                         if consecutive_m5_losses >= 3 {
-                            m5_pause_until =
-                                window[entry_minute - 1].timestamp + 90 * 60 * 1000;
+                            m5_pause_until = window[entry_minute - 1].timestamp + 90 * 60 * 1000;
                             consecutive_m5_losses = 0;
                         }
                     }
@@ -268,14 +296,41 @@ impl CryptoBacktestEngine {
             }
         }
 
-        Ok(build_result(config.initial_capital, capital, max_drawdown, trades))
+        if diagnostics.raw_signals > 0 {
+            diagnostics.raw_accuracy =
+                diagnostics.raw_correct as f64 / diagnostics.raw_signals as f64;
+            diagnostics.average_confidence = confidence_sum / diagnostics.raw_signals as f64;
+            diagnostics.calibration_gap = diagnostics.average_confidence - diagnostics.raw_accuracy;
+            diagnostics.brier_score = brier_sum / diagnostics.raw_signals as f64;
+        }
+        if diagnostics.first_half_signals > 0 {
+            diagnostics.first_half_accuracy =
+                first_half_correct as f64 / diagnostics.first_half_signals as f64;
+        }
+        if diagnostics.second_half_signals > 0 {
+            diagnostics.second_half_accuracy =
+                second_half_correct as f64 / diagnostics.second_half_signals as f64;
+        }
+
+        Ok(build_result(
+            config.initial_capital,
+            capital,
+            max_drawdown,
+            diagnostics,
+            trades,
+        ))
     }
 
     async fn load_one_minute_candles(&self, days: u32) -> Result<Vec<Candle>, anyhow::Error> {
         if days == 30 && Path::new(CACHE_PATH).exists() {
             let data = std::fs::read_to_string(CACHE_PATH)?;
             let candles: Vec<Candle> = serde_json::from_str(&data)?;
-            if candles.len() >= 40_000 {
+            let fresh_cutoff = chrono::Utc::now().timestamp_millis() - 10 * 60 * 1000;
+            let cache_is_fresh = candles
+                .last()
+                .map(|candle| candle.timestamp >= fresh_cutoff)
+                .unwrap_or(false);
+            if candles.len() >= 40_000 && cache_is_fresh {
                 tracing::info!("Loaded {} cached 1m candles", candles.len());
                 return Ok(candles);
             }
@@ -299,6 +354,7 @@ fn build_result(
     initial_capital: f64,
     final_capital: f64,
     max_drawdown: f64,
+    diagnostics: ModelDiagnostics,
     trades: Vec<CryptoTrade>,
 ) -> CryptoBacktestResult {
     let winning_trades = trades.iter().filter(|trade| trade.won).count();
@@ -338,10 +394,13 @@ fn build_result(
         },
         profit_factor: if gross_loss > 0.0 {
             gross_profit / gross_loss
+        } else if gross_profit > 0.0 {
+            f64::INFINITY
         } else {
             0.0
         },
         max_drawdown,
+        diagnostics,
         trades,
     }
 }

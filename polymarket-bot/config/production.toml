@@ -1,3 +1,32 @@
+[runtime]
+environment = "production"
+mode = "paper"
+strategy_version = "btc-updown-v2"
+
+[risk]
+max_open_positions = 1
+max_order_usd = 0.10
+max_daily_orders = 3
+max_daily_realized_loss_usd = 0.30
+max_drawdown = 0.20
+max_consecutive_losses = 3
+max_spread = 0.04
+max_data_age_ms = 15000
+
+[execution]
+order_type = "FOK"
+heartbeat_interval_secs = 5
+reconcile_before_ready = true
+cancel_on_shutdown = true
+
+[storage]
+database_path = "data-production/trading.db"
+backup_directory = "data-production/backups"
+
+[dashboard]
+bind = "127.0.0.1:3001"
+allow_live_mode_changes = false
+
 [general]
 initial_capital = 2.0
 max_positions = 1
@@ -5,8 +34,10 @@ log_level = "info"
 data_dir = "data-production"
 
 [api]
-gamma_base_url = "https://gamma-api.polymarket.com"
-clob_base_url = "https://clob.polymarket.com"
+# This host's WSL network cannot reach the Cloudflare-backed APIs directly.
+# The local release proxy forwards these public market-data requests.
+gamma_base_url = "http://localhost:3000"
+clob_base_url = "http://localhost:3000"
 timeout_secs = 10
 
 [orderbook]
@@ -17,7 +48,7 @@ min_volume_24h = 0
 [expected_value]
 cost_per_trade_pct = 0.02
 min_ev_threshold = 0.08
-min_edge_pct = 0.08
+min_edge_pct = 0.10
 
 [position_sizing]
 kelly_fraction = 0.0

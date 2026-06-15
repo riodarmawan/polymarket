@@ -60,6 +60,10 @@ pub enum Commands {
         #[arg(long, default_value = "7")]
         period: u32,
 
+        /// Restrict evaluated market windows to this WIB calendar date (YYYY-MM-DD)
+        #[arg(long)]
+        date: Option<String>,
+
         /// Initial capital in USD
         #[arg(long, default_value = "2.0")]
         capital: f64,
@@ -100,6 +104,9 @@ pub enum Commands {
 
     /// Validate production prerequisites without placing orders
     ProductionCheck,
+
+    /// Report implementation readiness without placing orders
+    ProductionReadiness,
 
     /// Show portfolio
     Portfolio {

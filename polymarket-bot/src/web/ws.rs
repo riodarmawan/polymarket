@@ -53,8 +53,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         "timeframe": s.timeframe,
                         "reason": s.reason,
                         "execution_note": *execution_note,
-                        "timestamp": s.timestamp
-                        ,"window_start_ts": s.window_start_ts
+                        "timestamp": s.timestamp,
+                        "window_start_ts": s.window_start_ts,
+                        "runtime_mode": state_clone.runtime.mode,
+                        "strategy_version": state_clone.runtime.strategy_version
                     });
                     if sender
                         .send(Message::Text(msg.to_string().into()))
@@ -80,10 +82,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         "timeframe": s.timeframe,
                         "reason": s.reason,
                         "execution_note": *execution_note,
-                        "timestamp": s.timestamp
-                        ,"window_start_ts": s.window_start_ts
+                        "timestamp": s.timestamp,
+                        "window_start_ts": s.window_start_ts,
+                        "runtime_mode": state_clone.runtime.mode,
+                        "strategy_version": state_clone.runtime.strategy_version
                     });
-                    if sender.send(Message::Text(msg.to_string().into())).await.is_err() {
+                    if sender
+                        .send(Message::Text(msg.to_string().into()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -96,6 +104,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             let updown_json: Vec<serde_json::Value> = updown
                 .iter()
                 .map(|m| {
+                    let age_ms = chrono::Utc::now().timestamp_millis() - m.captured_at_ms;
+                    let data_status =
+                        if age_ms > state_clone.runtime.configured_max_data_age_ms as i64 {
+                            "stale"
+                        } else {
+                            m.data_status.as_str()
+                        };
                     json!({
                         "asset": m.asset,
                         "slug": m.slug,
@@ -110,7 +125,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         "down_best_bid": m.down_best_bid,
                         "spread": m.spread,
                         "price_to_beat": m.price_to_beat,
-                        "current_price": m.current_price
+                        "current_price": m.current_price,
+                        "captured_at_ms": m.captured_at_ms,
+                        "data_age_ms": age_ms,
+                        "data_status": data_status,
+                        "data_detail": m.data_detail,
+                        "token_mapping_valid": m.token_mapping_valid,
+                        "tick_size": m.tick_size,
+                        "min_order_size": m.min_order_size,
+                        "fee_rate_bps": m.fee_rate_bps,
+                        "negative_risk": m.negative_risk,
+                        "up_executable_depth_usd": m.up_executable_depth_usd,
+                        "down_executable_depth_usd": m.down_executable_depth_usd,
+                        "up_expected_fill_price": m.up_expected_fill_price,
+                        "down_expected_fill_price": m.down_expected_fill_price,
+                        "clock_drift_ms": m.clock_drift_ms
                     })
                 })
                 .collect();
@@ -147,7 +176,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         "confidence": t.confidence,
                         "edge": t.edge,
                         "pnl": t.pnl,
-                        "status": t.status
+                        "status": t.status,
+                        "runtime_mode": state_clone.runtime.mode,
+                        "strategy_version": state_clone.runtime.strategy_version
                     })
                 })
                 .collect();

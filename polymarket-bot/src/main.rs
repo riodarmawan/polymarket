@@ -26,16 +26,16 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let config = Config::load()?;
+    config.print_startup_summary();
 
     match cli.command {
         Commands::Collect { daemon, interval } => {
             let db_path = std::path::Path::new(&config.general.data_dir).join("polymarket.db");
             let db = storage::database::Database::new(&db_path).await?;
-            let collector =
-                collector::data_collector::DataCollector::new(
-                    config.api.gamma_base_url.clone(),
-                    config.trading.max_hours_to_resolution,
-                );
+            let collector = collector::data_collector::DataCollector::new(
+                config.api.gamma_base_url.clone(),
+                config.trading.max_hours_to_resolution,
+            );
 
             if daemon {
                 loop {
@@ -124,14 +124,21 @@ async fn main() -> anyhow::Result<()> {
                     _ => "1m",
                 };
 
-                match clob_client.fetch_price_history(&token_id, interval, 60).await {
+                match clob_client
+                    .fetch_price_history(&token_id, interval, 60)
+                    .await
+                {
                     Ok(history) => {
                         let points = history.history;
                         if points.is_empty() {
                             tracing::debug!("No history for {}", market.id);
                             continue;
                         }
-                        tracing::info!("Market {}: {} price points", market.question.chars().take(40).collect::<String>(), points.len());
+                        tracing::info!(
+                            "Market {}: {} price points",
+                            market.question.chars().take(40).collect::<String>(),
+                            points.len()
+                        );
 
                         for p in &points {
                             let spread = 0.02;
@@ -154,10 +161,16 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            tracing::info!("Fetched price history for {} markets ({} total observations)", markets_with_data, observations.len());
+            tracing::info!(
+                "Fetched price history for {} markets ({} total observations)",
+                markets_with_data,
+                observations.len()
+            );
 
             if observations.is_empty() {
-                tracing::error!("No price data available. Run 'collect' first and ensure proxy is running.");
+                tracing::error!(
+                    "No price data available. Run 'collect' first and ensure proxy is running."
+                );
                 return Ok(());
             }
 
@@ -172,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Try TUI, fallback to report if terminal not interactive
             match backtesting::ui::run_backtest_ui(&result) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => {
                     tracing::warn!("TUI not available ({}), using text report", e);
                 }
@@ -211,10 +224,13 @@ async fn main() -> anyhow::Result<()> {
                 println!("{:#?}", config);
             }
         },
-        Commands::Crypto { paper, timeframes: _ } => {
+        Commands::Crypto {
+            paper,
+            timeframes: _,
+        } => {
             tracing::info!("Starting crypto trading bot...");
             tracing::info!("Paper mode: {}", paper);
-            
+
             let crypto_config = polymarket_bot::config::CryptoConfig {
                 enabled: true,
                 initial_capital: config.general.initial_capital,
@@ -223,22 +239,53 @@ async fn main() -> anyhow::Result<()> {
                 min_confidence: 0.6,
                 timeframes: vec!["5m".into(), "15m".into(), "1h".into()],
             };
-            
+
             let engine = polymarket_bot::crypto::CryptoEngine::new(
                 crypto_config,
                 &config.api.gamma_base_url,
             );
-            
+
             if let Err(e) = engine.run().await {
                 tracing::error!("Crypto engine error: {}", e);
             }
         }
-        Commands::CryptoBacktest { period, capital, timeframes, source_interval } => {
+        Commands::CryptoBacktest {
+            period,
+            date,
+            capital,
+            timeframes,
+            source_interval,
+        } => {
             tracing::info!("Running crypto backtest...");
             tracing::info!("Period: {} days, Capital: ${:.2}", period, capital);
             tracing::info!("Timeframes: {}", timeframes);
             tracing::info!("Source interval: {}m", source_interval);
-            
+
+            let target_range = date
+                .as_deref()
+                .map(|value| -> anyhow::Result<(i64, i64)> {
+                    let date = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")?;
+                    let local_start = date
+                        .and_hms_opt(0, 0, 0)
+                        .ok_or_else(|| anyhow::anyhow!("invalid WIB calendar date"))?;
+                    let start_ts = local_start.and_utc().timestamp_millis() - 7 * 60 * 60 * 1000;
+                    Ok((start_ts, start_ts + 24 * 60 * 60 * 1000))
+                })
+                .transpose()?;
+
+            if let Some((start_ts, end_ts)) = target_range {
+                tracing::info!(
+                    "Restricting evaluated windows to {} WIB (UTC {} to {})",
+                    date.as_deref().unwrap_or_default(),
+                    chrono::DateTime::from_timestamp_millis(start_ts)
+                        .map(|value| value.to_rfc3339())
+                        .unwrap_or_default(),
+                    chrono::DateTime::from_timestamp_millis(end_ts)
+                        .map(|value| value.to_rfc3339())
+                        .unwrap_or_default()
+                );
+            }
+
             let timeframes: Vec<polymarket_bot::crypto::indicators::Timeframe> = timeframes
                 .split(',')
                 .filter_map(|tf| match tf.trim() {
@@ -250,7 +297,7 @@ async fn main() -> anyhow::Result<()> {
                     _ => None,
                 })
                 .collect();
-            
+
             let bt_config = polymarket_bot::crypto::backtest::CryptoBacktestConfig {
                 initial_capital: capital,
                 min_order_usd: 0.10,
@@ -262,29 +309,87 @@ async fn main() -> anyhow::Result<()> {
                 min_edge: 0.10,
                 entry_minute: 3,
                 source_interval_minutes: source_interval,
+                target_start_ts: target_range.map(|range| range.0),
+                target_end_ts: target_range.map(|range| range.1),
             };
-            
+
             let engine = polymarket_bot::crypto::backtest::CryptoBacktestEngine::new();
-            
+
             match engine.run_backtest(&bt_config, period).await {
                 Ok(result) => {
                     println!("\n╔══════════════════════════════════════════════════════════════╗");
                     println!("║              CRYPTO BACKTEST REPORT                         ║");
                     println!("╠══════════════════════════════════════════════════════════════╣");
-                    println!("║ Initial Capital:  ${:>8.2}                              ║", result.initial_capital);
-                    println!("║ Final Capital:    ${:>8.2}                              ║", result.final_capital);
-                    println!("║ Total PnL:        ${:>8.2} ({:.1}%)                    ║", result.total_pnl, (result.total_pnl / result.initial_capital) * 100.0);
+                    println!(
+                        "║ Initial Capital:  ${:>8.2}                              ║",
+                        result.initial_capital
+                    );
+                    println!(
+                        "║ Final Capital:    ${:>8.2}                              ║",
+                        result.final_capital
+                    );
+                    println!(
+                        "║ Total PnL:        ${:>8.2} ({:.1}%)                    ║",
+                        result.total_pnl,
+                        (result.total_pnl / result.initial_capital) * 100.0
+                    );
                     println!("╠══════════════════════════════════════════════════════════════╣");
-                    println!("║ Total Trades:     {:>8}                              ║", result.total_trades);
-                    println!("║ Winning Trades:   {:>8} ({:.1}%)                    ║", result.winning_trades, result.win_rate * 100.0);
-                    println!("║ Losing Trades:    {:>8}                              ║", result.losing_trades);
+                    println!(
+                        "║ Total Trades:     {:>8}                              ║",
+                        result.total_trades
+                    );
+                    println!(
+                        "║ Winning Trades:   {:>8} ({:.1}%)                    ║",
+                        result.winning_trades,
+                        result.win_rate * 100.0
+                    );
+                    println!(
+                        "║ Losing Trades:    {:>8}                              ║",
+                        result.losing_trades
+                    );
                     println!("╠══════════════════════════════════════════════════════════════╣");
-                    println!("║ Avg Win:          ${:>8.2}                              ║", result.avg_win);
-                    println!("║ Avg Loss:         ${:>8.2}                              ║", result.avg_loss);
-                    println!("║ Profit Factor:    {:>8.2}                              ║", result.profit_factor);
-                    println!("║ Max Drawdown:     {:>7.1}%                             ║", result.max_drawdown * 100.0);
+                    println!(
+                        "║ Avg Win:          ${:>8.2}                              ║",
+                        result.avg_win
+                    );
+                    println!(
+                        "║ Avg Loss:         ${:>8.2}                              ║",
+                        result.avg_loss
+                    );
+                    println!(
+                        "║ Profit Factor:    {:>8.2}                              ║",
+                        result.profit_factor
+                    );
+                    println!(
+                        "║ Max Drawdown:     {:>7.1}%                             ║",
+                        result.max_drawdown * 100.0
+                    );
                     println!("╚══════════════════════════════════════════════════════════════╝");
-                    
+                    println!("\nModel diagnostics before synthetic-odds filtering:");
+                    println!(
+                        "  Raw signals: {} | accuracy: {:.1}% | avg confidence: {:.1}% | calibration gap: {:+.1}%",
+                        result.diagnostics.raw_signals,
+                        result.diagnostics.raw_accuracy * 100.0,
+                        result.diagnostics.average_confidence * 100.0,
+                        result.diagnostics.calibration_gap * 100.0
+                    );
+                    println!(
+                        "  First half accuracy: {:.1}% (n={}) | second half: {:.1}% (n={}) | Brier: {:.3}",
+                        result.diagnostics.first_half_accuracy * 100.0,
+                        result.diagnostics.first_half_signals,
+                        result.diagnostics.second_half_accuracy * 100.0,
+                        result.diagnostics.second_half_signals,
+                        result.diagnostics.brier_score
+                    );
+                    println!(
+                        "  Conservative max-ask stress trades: {} | accuracy: {:.1}%",
+                        result.total_trades,
+                        result.win_rate * 100.0
+                    );
+                    println!(
+                        "  WARNING: PnL assumes every signal fills at the configured maximum ask and resolves from Binance."
+                    );
+
                     // Show last 10 trades
                     if !result.trades.is_empty() {
                         println!("\nLast 10 trades:");
@@ -292,7 +397,7 @@ async fn main() -> anyhow::Result<()> {
                         for t in &result.trades[start..] {
                             let emoji = if t.won { "✓" } else { "✗" };
                             println!(
-                                "  {} {:?} {} BTC {:.2} -> {:.2} | Ask: {:.2} Edge: {:.1}% | PnL: ${:.2}",
+                                "  {} {:?} {} BTC {:.2} -> {:.2} | Ask: {:.2} Model margin: {:.1}% | PnL: ${:.2}",
                                 emoji, t.timeframe, t.direction, t.entry_price, t.exit_price, t.market_price, t.edge * 100.0, t.pnl
                             );
                         }
@@ -315,10 +420,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Web { port } => {
             tracing::info!("Starting web trading dashboard on port {}...", port);
-            crate::web::run_web_server(port).await?;
+            crate::web::run_web_server(port, &config).await?;
         }
         Commands::ProductionCheck => {
-            production::run_preflight().await?;
+            production::run_preflight(&config).await?;
+        }
+        Commands::ProductionReadiness => {
+            production::print_readiness(&config);
         }
     }
 

@@ -25,6 +25,7 @@ async fn test_full_flow_collect_trade() {
         volume: 10000.0,
         end_date: "2026-12-31".to_string(),
         created_at: Utc::now(),
+        yes_token_id: None,
     };
     db.save_market(&market).await.unwrap();
 
