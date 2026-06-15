@@ -216,6 +216,7 @@ pub enum DataStatus {
     Stale,
     Unavailable,
     Incomplete,
+    OneSided,
 }
 
 impl DataStatus {
@@ -229,6 +230,7 @@ impl DataStatus {
             Self::Stale => "stale",
             Self::Unavailable => "unavailable",
             Self::Incomplete => "incomplete",
+            Self::OneSided => "one_sided",
         }
     }
 }

@@ -211,7 +211,7 @@ async fn run_updown_scanner(state: AppState, gamma_base_url: String, clob_base_u
                         clob_client.fetch_fee_rate_bps(&down_token)
                     );
                     let up_book = match up_book {
-                        Ok(book) => match book.validated_best_bid_ask(&up_token) {
+                        Ok(book) => match book.validated_top_of_book(&up_token) {
                             Some(_) => book,
                             None => {
                                 updown_markets.push(unavailable_market(
@@ -222,7 +222,7 @@ async fn run_updown_scanner(state: AppState, gamma_base_url: String, clob_base_u
                                     end_ts,
                                     remaining,
                                     state::DataStatus::Incomplete,
-                                    "UP orderbook is empty or invalid",
+                                    "UP orderbook has no valid levels",
                                 ));
                                 continue;
                             }
@@ -242,7 +242,7 @@ async fn run_updown_scanner(state: AppState, gamma_base_url: String, clob_base_u
                         }
                     };
                     let down_book = match down_book {
-                        Ok(book) => match book.validated_best_bid_ask(&down_token) {
+                        Ok(book) => match book.validated_top_of_book(&down_token) {
                             Some(_) => book,
                             None => {
                                 updown_markets.push(unavailable_market(
@@ -253,7 +253,7 @@ async fn run_updown_scanner(state: AppState, gamma_base_url: String, clob_base_u
                                     end_ts,
                                     remaining,
                                     state::DataStatus::Incomplete,
-                                    "DOWN orderbook is empty or invalid",
+                                    "DOWN orderbook has no valid levels",
                                 ));
                                 continue;
                             }
@@ -272,10 +272,10 @@ async fn run_updown_scanner(state: AppState, gamma_base_url: String, clob_base_u
                             continue;
                         }
                     };
-                    let Some((up_bid, up_ask)) = up_book.validated_best_bid_ask(&up_token) else {
+                    let Some((up_bid, up_ask)) = up_book.validated_top_of_book(&up_token) else {
                         continue;
                     };
-                    let Some((down_bid, down_ask)) = down_book.validated_best_bid_ask(&down_token)
+                    let Some((down_bid, down_ask)) = down_book.validated_top_of_book(&down_token)
                     else {
                         continue;
                     };
@@ -301,14 +301,31 @@ async fn run_updown_scanner(state: AppState, gamma_base_url: String, clob_base_u
                             (Some(up), Some(down)) => up.min(down),
                             _ => chrono::Utc::now().timestamp_millis(),
                         };
+                    let one_sided = up_bid.is_none()
+                        || up_ask.is_none()
+                        || down_bid.is_none()
+                        || down_ask.is_none();
                     let metadata_complete = tick_size.is_some()
                         && min_order_size.is_some()
                         && fee_rate_bps.is_some()
                         && up_quote.is_some()
                         && down_quote.is_some()
+                        && !one_sided
                         && clock_drift_ms
                             .map(|drift| drift.abs() <= MAX_CLOCK_DRIFT_MS)
                             .unwrap_or(false);
+                    let spread = match (up_ask, down_ask, up_bid, down_bid) {
+                        (Some(up_ask), Some(down_ask), _, _) => {
+                            (up_ask + down_ask - 1.0).abs()
+                        }
+                        (_, Some(down_ask), Some(up_bid), _) => {
+                            (down_ask - (1.0 - up_bid)).abs()
+                        }
+                        (Some(up_ask), _, _, Some(down_bid)) => {
+                            (up_ask - (1.0 - down_bid)).abs()
+                        }
+                        _ => 0.0,
+                    };
 
                     let current_price = if asset == "btc" { btc_price } else { 0.0 };
                     let price_to_beat = previous_prices
@@ -325,11 +342,11 @@ async fn run_updown_scanner(state: AppState, gamma_base_url: String, clob_base_u
                         remaining_seconds: remaining,
                         up_token_id: Some(up_token),
                         down_token_id: Some(down_token),
-                        up_best_ask: Some(up_ask),
-                        up_best_bid: Some(up_bid),
-                        down_best_ask: Some(down_ask),
-                        down_best_bid: Some(down_bid),
-                        spread: (up_ask + down_ask - 1.0).abs(),
+                        up_best_ask: up_ask,
+                        up_best_bid: up_bid,
+                        down_best_ask: down_ask,
+                        down_best_bid: down_bid,
+                        spread,
                         status: if remaining > 0 {
                             "live".to_string()
                         } else {
@@ -338,12 +355,22 @@ async fn run_updown_scanner(state: AppState, gamma_base_url: String, clob_base_u
                         price_to_beat,
                         current_price,
                         captured_at_ms: book_timestamp_ms,
-                        data_status: if metadata_complete {
+                        data_status: if one_sided {
+                            state::DataStatus::OneSided
+                        } else if metadata_complete {
                             state::DataStatus::Ready
                         } else {
                             state::DataStatus::Incomplete
                         },
-                        data_detail: if metadata_complete {
+                        data_detail: if one_sided {
+                            format!(
+                                "One-sided CLOB: UP bids={} asks={}, DOWN bids={} asks={}; execution blocked",
+                                up_book.bids.len(),
+                                up_book.asks.len(),
+                                down_book.bids.len(),
+                                down_book.asks.len()
+                            )
+                        } else if metadata_complete {
                             "Gamma metadata, CLOB books, fees, depth, and clock validated".to_string()
                         } else {
                             "Execution metadata, depth, fee rate, or clock check incomplete"

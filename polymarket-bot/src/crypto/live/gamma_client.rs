@@ -218,7 +218,10 @@ impl GammaMarket {
 }
 
 impl ClobOrderBook {
-    pub fn validated_best_bid_ask(&self, expected_token: &str) -> Option<(f64, f64)> {
+    pub fn validated_top_of_book(
+        &self,
+        expected_token: &str,
+    ) -> Option<(Option<f64>, Option<f64>)> {
         if self.asset_id != expected_token {
             return None;
         }
@@ -232,14 +235,24 @@ impl ClobOrderBook {
             .iter()
             .filter_map(parse)
             .map(|(price, _)| price)
-            .reduce(f64::max)?;
+            .reduce(f64::max);
         let best_ask = self
             .asks
             .iter()
             .filter_map(parse)
             .map(|(price, _)| price)
-            .reduce(f64::min)?;
-        (best_bid <= best_ask).then_some((best_bid, best_ask))
+            .reduce(f64::min);
+
+        match (best_bid, best_ask) {
+            (None, None) => None,
+            (Some(bid), Some(ask)) if bid > ask => None,
+            prices => Some(prices),
+        }
+    }
+
+    pub fn validated_best_bid_ask(&self, expected_token: &str) -> Option<(f64, f64)> {
+        let (best_bid, best_ask) = self.validated_top_of_book(expected_token)?;
+        Some((best_bid?, best_ask?))
     }
 
     pub fn tick_size(&self) -> Option<f64> {
@@ -571,5 +584,13 @@ mod tests {
         assert!((quote.shares - 1.0).abs() < f64::EPSILON);
         assert!((quote.available_depth_usd - 1.11).abs() < 0.000_001);
         assert_eq!(book.quote_buy_usd("up-token", 2.0), None);
+
+        let mut one_sided = book.clone();
+        one_sided.asks.clear();
+        assert_eq!(
+            one_sided.validated_top_of_book("up-token"),
+            Some((Some(0.49), None))
+        );
+        assert_eq!(one_sided.validated_best_bid_ask("up-token"), None);
     }
 }
