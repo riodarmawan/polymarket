@@ -764,13 +764,13 @@ impl Config {
                 bail!("production dashboard must bind to 127.0.0.1:3001");
             }
             if self.risk.max_open_positions > 1
-                || self.risk.max_order_usd > 0.50
+                || self.risk.max_order_usd > 4.00
                 || self.risk.max_daily_orders > 3
                 || self.risk.max_daily_realized_loss_usd > 0.30
                 || self.risk.max_drawdown > 0.20
                 || self.risk.max_consecutive_losses > 3
             {
-                bail!("production risk limits exceed the approved $2 operator limits");
+                bail!("production risk limits exceed the approved $7.50 operator limits");
             }
             if !self.execution.reconcile_before_ready || !self.execution.cancel_on_shutdown {
                 bail!("production requires reconciliation and cancel-on-shutdown");
@@ -847,15 +847,18 @@ mod tests {
     }
 
     #[test]
-    fn production_requires_explicit_config_and_canary_limits() {
+    fn production_requires_explicit_config_and_operator_limits() {
         let mut config = Config::default();
         config.runtime.environment = RuntimeEnvironment::Production;
         assert!(config.validate(false).is_err());
 
-        config.risk.max_order_usd = 0.51;
+        config.risk.max_order_usd = 4.01;
         assert!(config.validate(true).is_err());
 
-        config.risk.max_order_usd = 0.50;
+        config.risk.max_order_usd = 4.00;
+        config.general.initial_capital = 7.50;
+        config.position_sizing.max_position_pct = 0.50;
+        config.position_sizing.max_position_usd = 4.00;
         assert!(config.validate(true).is_ok());
     }
 

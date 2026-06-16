@@ -64,8 +64,8 @@ collateral. Old V1 examples, USDC.e assumptions, and legacy SDKs are invalid.
 8. Derive new CLOB V2 L2 API credentials for the new identity.
 9. Store secrets outside Git using `production.env.example` as a field list.
 
-For a $2 experiment, initially deposit only $2 pUSD. Keep a separate wallet for
-any larger funds.
+For the current small operator profile, initially deposit only about `$7.50` to
+`$8.00` pUSD. Keep a separate wallet for any larger funds.
 
 ## Mandatory Preflight
 
@@ -249,18 +249,19 @@ The check intentionally fails unless:
 
 Do not bypass a failed geoblock check or use a VPN to evade restrictions.
 
-## $2 Capital Guards
+## $7.50 Capital Guards
 
 - One open position across both strategies.
-- Live order size: `$0.50`, matching Polymarket's current minimum-size
-  constraint and the production strategy config.
+- Live order size cap: `$4.00`, sized to satisfy 5-share markets only when the
+  ask is within the configured entry-price ceiling.
 - Maximum daily realized loss: `$0.30`.
 - Maximum daily orders: `3`.
 - Stop after `3` consecutive losses.
 - No martingale, averaging down, or automatic risk increase.
 - Never place an order unless current book `min_order_size`, tick size, spread,
   balance, allowance, and fee rate have been fetched and validated.
-- If the market minimum cannot be satisfied with `$0.50`, skip the market.
+- If the market minimum cannot be satisfied with the configured order cap, skip
+  the market.
 - Do not assume the backtest fee. Fetch the current fee rate for every token.
 
 ## Go-Live Evidence

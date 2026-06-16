@@ -24,13 +24,13 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            capital: 2.0,
-            max_order: 0.50,
+            capital: 7.50,
+            max_order: 4.00,
             timeframe: "15m".to_string(),
             auto_trade: true,
             min_edge: 0.10,
             max_entry_price: 0.60,
-            risk_fraction: 0.05,
+            risk_fraction: 0.50,
         }
     }
 }

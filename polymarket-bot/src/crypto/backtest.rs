@@ -25,9 +25,9 @@ pub struct CryptoBacktestConfig {
 impl Default for CryptoBacktestConfig {
     fn default() -> Self {
         Self {
-            initial_capital: 2.0,
-            min_order_usd: 0.10,
-            max_order_usd: 0.50,
+            initial_capital: 7.50,
+            min_order_usd: 0.50,
+            max_order_usd: 4.00,
             fee_pct: 0.02,
             timeframes: vec![Timeframe::M15],
             min_entry_price: 0.15,

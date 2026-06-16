@@ -55,10 +55,11 @@ binds to `0.0.0.0:3001` so Windows and the Codex in-app browser can reach WSL.
 ## Current Production Assumptions
 
 - Config file: `polymarket-bot/config/production.toml`
-- Starting strategy capital: `$2.00`
+- Starting strategy capital: `$7.50`
 - Shared capital pool: `5m` and `15m` both consume the same risk budget
 - Minimum order size: `$0.50`
-- Maximum order size: `$0.50`
+- Maximum order size: `$4.00`
+- Maximum risk fraction: `50%` for this small-balance operator canary profile
 - Enabled timeframes: `5m` and `15m`
 - Backtest CLI default for crypto production checks now uses `$0.50` minimum
   order size, matching the live operator config.
@@ -108,7 +109,7 @@ POLYMARKET_CONFIG="$PWD/config/production.toml" \
   cargo run --release -- crypto-backtest \
   --symbol btc \
   --period 7 \
-  --capital 2.0 \
+  --capital 7.5 \
   --timeframes 5m,15m \
   --source-interval 1
 ```
@@ -121,7 +122,7 @@ POLYMARKET_CONFIG="$PWD/config/production.toml" \
   cargo run --release -- crypto-backtest \
   --symbol btc \
   --date 2026-06-14 \
-  --capital 2.0 \
+  --capital 7.5 \
   --timeframes 5m,15m \
   --source-interval 1
 ```

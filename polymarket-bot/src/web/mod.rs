@@ -21,7 +21,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
 // Assets to scan for Up/Down markets
-const CRYPTO_ASSETS: &[&str] = &["btc", "eth", "sol", "xrp", "doge", "bnb"];
+const CRYPTO_ASSETS: &[&str] = &["btc"];
 const MAX_CLOCK_DRIFT_MS: i64 = 5_000;
 
 pub async fn run_web_server(port: u16, config: &Config) -> anyhow::Result<()> {
@@ -314,6 +314,13 @@ async fn run_updown_scanner(state: AppState, gamma_base_url: String, clob_base_u
                         (Some(up), Some(down)) => up.min(down),
                         _ => chrono::Utc::now().timestamp_millis(),
                     };
+                    let current_price = if asset == "btc" { btc_price } else { 0.0 };
+                    let price_to_beat = previous_prices
+                        .get(&slug)
+                        .copied()
+                        .filter(|price| *price > 0.0)
+                        .unwrap_or(current_price);
+                    let reference_prices_ready = current_price > 0.0 && price_to_beat > 0.0;
                     let one_sided = up_bid.is_none()
                         || up_ask.is_none()
                         || down_bid.is_none()
@@ -323,6 +330,7 @@ async fn run_updown_scanner(state: AppState, gamma_base_url: String, clob_base_u
                         && fee_rate_bps.is_some()
                         && up_quote.is_some()
                         && down_quote.is_some()
+                        && reference_prices_ready
                         && !one_sided
                         && clock_drift_ms
                             .map(|drift| drift.abs() <= MAX_CLOCK_DRIFT_MS)
@@ -334,12 +342,6 @@ async fn run_updown_scanner(state: AppState, gamma_base_url: String, clob_base_u
                         _ => 0.0,
                     };
 
-                    let current_price = if asset == "btc" { btc_price } else { 0.0 };
-                    let price_to_beat = previous_prices
-                        .get(&slug)
-                        .copied()
-                        .filter(|price| *price > 0.0)
-                        .unwrap_or(current_price);
                     updown_markets.push(state::UpDownMarket {
                         asset: asset.to_string(),
                         slug: slug.clone(),
@@ -379,6 +381,9 @@ async fn run_updown_scanner(state: AppState, gamma_base_url: String, clob_base_u
                             )
                         } else if metadata_complete {
                             "Gamma metadata, CLOB books, fees, depth, and clock validated".to_string()
+                        } else if !reference_prices_ready {
+                            "Missing reference price or price-to-beat; execution blocked"
+                                .to_string()
                         } else {
                             "Execution metadata, depth, fee rate, or clock check incomplete"
                                 .to_string()
@@ -888,9 +893,9 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
         .map(|bps| size_usd * bps as f64 / 10_000.0)
         .unwrap_or(size_usd * state.runtime.configured_fee_pct);
     let (min_price, max_price, min_margin, entry_start, entry_end) = if timeframe == "5m" {
-        (0.05, 0.62, 0.08, 60, 150)
+        (0.05, 0.62, 0.08, 45, 180)
     } else {
-        (0.15, settings.max_entry_price, settings.min_edge, 180, 300)
+        (0.15, settings.max_entry_price, settings.min_edge, 190, 600)
     };
     let mut risk_stats = if timeframe == "5m" {
         stats_5m.clone()
@@ -1385,6 +1390,9 @@ fn validate_market_freshness(
         > runtime.configured_max_data_age_ms as i64
     {
         return Err("is stale");
+    }
+    if market.price_to_beat <= 0.0 || market.current_price <= 0.0 {
+        return Err("is missing reference price");
     }
     Ok(())
 }

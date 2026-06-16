@@ -217,7 +217,7 @@ impl RiskEngine {
             "entry_window",
             (request.entry_window_start_secs..=request.entry_window_end_secs)
                 .contains(&elapsed_secs),
-            "elapsed time is inside entry window",
+            "elapsed time must be inside entry window",
         );
         push_check(
             &mut checks,
@@ -283,13 +283,19 @@ impl RiskEngine {
         );
         push_check(
             &mut checks,
+            "no_executable_depth",
+            request.executable_depth_usd > 0.0,
+            "target side has executable ask depth",
+        );
+        push_check(
+            &mut checks,
             "depth",
             request.executable_depth_usd >= request.requested_usd,
             "executable depth covers requested amount",
         );
         push_check(
             &mut checks,
-            "minimum_shares",
+            "capital_below_minimum_shares",
             matches!((shares, request.min_order_size_shares), (Some(actual), Some(minimum)) if actual >= minimum),
             "order satisfies CLOB minimum share size",
         );
@@ -510,12 +516,19 @@ mod tests {
         assert_eq!(engine.evaluate(value).reason_code, "snapshot_freshness");
 
         let mut value = request();
+        value.executable_depth_usd = 0.0;
+        assert_eq!(engine.evaluate(value).reason_code, "no_executable_depth");
+
+        let mut value = request();
         value.executable_depth_usd = 0.09;
         assert_eq!(engine.evaluate(value).reason_code, "depth");
 
         let mut value = request();
         value.min_order_size_shares = Some(0.21);
-        assert_eq!(engine.evaluate(value).reason_code, "minimum_shares");
+        assert_eq!(
+            engine.evaluate(value).reason_code,
+            "capital_below_minimum_shares"
+        );
 
         let mut value = request();
         value.fee_rate_bps = Some(501);
