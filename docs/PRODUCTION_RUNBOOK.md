@@ -186,6 +186,20 @@ itself; Phase 6 still requires a reviewed `lifecycle-live-canary` artifact after
 wallet onboarding, dry-sign validation, reconciliation, and explicit operator
 authorization.
 
+Run the non-live dry-sign safety drill after changing signer or secret loading
+code:
+
+```bash
+./deploy/drill-dry-sign-safety.sh
+```
+
+This intentionally runs `dry-sign` with wallet and CLOB credentials removed and
+passes only if the command fails closed before any signing or submission path.
+It writes `drill_type=dry-sign-safety`. This is necessary evidence, but it does
+not complete Phase 5 by itself; Phase 5 still requires a redacted
+`drill_type=new-wallet-dry-sign` artifact produced on the production host with a
+new uncompromised wallet, POLY_1271 signature type `3`, and `submitted=false`.
+
 Before issuing any canary authorization, generate a redacted operator review
 packet for the exact durable execution intent:
 

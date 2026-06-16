@@ -142,6 +142,7 @@ pub async fn build_readiness_report(config: &Config) -> ProductionReadinessRepor
     let reconciliation_evidence = reconciliation_ready
         .map(|ready| ready.to_string())
         .unwrap_or_else(|| store_evidence.clone());
+    let signer_drills = signer_drill_evidence(config);
     let lifecycle_drills = lifecycle_drill_evidence(config);
     let deployment_drills = deployment_drill_evidence(config);
 
@@ -223,9 +224,9 @@ pub async fn build_readiness_report(config: &Config) -> ProductionReadinessRepor
         readiness_check(
             "Phase 5",
             "dry-sign and new signer validation are complete",
-            false,
+            signer_drills.0,
             true,
-            "requires uncompromised wallet and production-host dry-sign".to_string(),
+            signer_drills.1,
         ),
         readiness_check(
             "Phase 6",
@@ -367,6 +368,96 @@ fn canary_gate_error(report: &ProductionReadinessReport) -> Option<String> {
             report.blockers.len()
         )
     })
+}
+
+fn signer_drill_evidence(config: &Config) -> (bool, String) {
+    let drill_dir = drill_summary_dir(config);
+    let summaries = load_deployment_drill_summaries(&drill_dir);
+    signer_drill_evidence_from_summaries(&summaries, &drill_dir)
+}
+
+fn signer_drill_evidence_from_summaries(summaries: &[Value], drill_dir: &Path) -> (bool, String) {
+    const REQUIRED_DRILLS: [&str; 2] = ["dry-sign-safety", "new-wallet-dry-sign"];
+
+    let mut completed = BTreeSet::new();
+    for summary in summaries {
+        let Some(drill_type) = summary.get("drill_type").and_then(Value::as_str) else {
+            continue;
+        };
+        if signer_drill_summary_passes(drill_type, summary) {
+            completed.insert(drill_type.to_string());
+        }
+    }
+
+    let missing: Vec<&str> = REQUIRED_DRILLS
+        .into_iter()
+        .filter(|drill| !completed.contains(*drill))
+        .collect();
+
+    let completed_text = if completed.is_empty() {
+        "none".to_string()
+    } else {
+        completed.into_iter().collect::<Vec<_>>().join(", ")
+    };
+
+    if missing.is_empty() {
+        (
+            true,
+            format!(
+                "completed: {completed_text}; source={}",
+                drill_dir.display()
+            ),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "completed: {completed_text}; missing: {}; source={}",
+                missing.join(", "),
+                drill_dir.display()
+            ),
+        )
+    }
+}
+
+fn signer_drill_summary_passes(drill_type: &str, summary: &Value) -> bool {
+    let ok = summary.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    if !ok {
+        return false;
+    }
+    match drill_type {
+        "dry-sign-safety" => {
+            let submitted = summary
+                .get("submitted")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let live_credentials_required = summary
+                .get("live_credentials_required")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let failed_closed_without_credentials = summary
+                .get("failed_closed_without_credentials")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            !submitted && !live_credentials_required && failed_closed_without_credentials
+        }
+        "new-wallet-dry-sign" => {
+            let submitted = summary
+                .get("submitted")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let signature_type_ok = summary
+                .get("signature_type")
+                .and_then(Value::as_u64)
+                .is_some_and(|value| value == 3);
+            let signature_present = summary
+                .get("signature_present")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            !submitted && signature_type_ok && signature_present
+        }
+        _ => false,
+    }
 }
 
 fn lifecycle_drill_evidence(config: &Config) -> (bool, String) {
@@ -835,6 +926,48 @@ mod tests {
         assert!(!ok);
         assert!(evidence.contains("completed: none"));
         assert!(evidence.contains("missing: production-paper, reboot, restore"));
+    }
+
+    #[test]
+    fn signer_drill_evidence_keeps_phase5_blocked_after_safety_drill() {
+        let summary = json!({
+            "drill_type": "dry-sign-safety",
+            "ok": true,
+            "submitted": false,
+            "live_credentials_required": false,
+            "failed_closed_without_credentials": true
+        });
+        let (ok, evidence) =
+            signer_drill_evidence_from_summaries(&[summary], Path::new("data-production/drills"));
+
+        assert!(!ok);
+        assert!(evidence.contains("completed: dry-sign-safety"));
+        assert!(evidence.contains("missing: new-wallet-dry-sign"));
+    }
+
+    #[test]
+    fn signer_drill_evidence_passes_only_after_new_wallet_dry_sign() {
+        let summaries = vec![
+            json!({
+                "drill_type": "dry-sign-safety",
+                "ok": true,
+                "submitted": false,
+                "live_credentials_required": false,
+                "failed_closed_without_credentials": true
+            }),
+            json!({
+                "drill_type": "new-wallet-dry-sign",
+                "ok": true,
+                "submitted": false,
+                "signature_type": 3,
+                "signature_present": true
+            }),
+        ];
+        let (ok, evidence) =
+            signer_drill_evidence_from_summaries(&summaries, Path::new("data-production/drills"));
+
+        assert!(ok);
+        assert!(evidence.contains("completed: dry-sign-safety, new-wallet-dry-sign"));
     }
 
     #[test]
