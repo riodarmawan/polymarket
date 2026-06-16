@@ -62,6 +62,8 @@ binds to `0.0.0.0:3001` so Windows and the Codex in-app browser can reach WSL.
 - Maximum risk fraction: `50%` for this small-balance operator canary profile
 - Maximum fee rate: `1000 bps`; model margin must cover the configured edge
   plus the observed fee rate
+- Crypto backtest fee assumption: `10%`, matching the observed `1000 bps`
+  CLOB fee on these short crypto markets
 - Enabled timeframes: `5m` and `15m`
 - Backtest CLI default for crypto production checks now uses `$0.50` minimum
   order size, matching the live operator config.
