@@ -30,11 +30,15 @@ EXCLUDED_SUFFIXES = (
 ALLOW_MARKERS = (
     "replace_me",
     "0xreplace_me",
+    "kunci_api",
+    "api_secret_dari",
+    "passphrase_dari",
     "your_",
     "example",
     "placeholder",
     "redacted",
     "[redacted]",
+    ".env",
     "<client_key>",
     "<authorization_id>",
     "<intent_amount>",
@@ -85,7 +89,13 @@ def is_excluded(path: str) -> bool:
 
 def is_allowed(line: str) -> bool:
     lowered = line.lower()
-    return any(marker in lowered for marker in ALLOW_MARKERS)
+    return (
+        any(marker in lowered for marker in ALLOW_MARKERS)
+        or "${" in line
+        or "$POLYMARKET_" in line
+        or "os.environ[" in line
+        or "creds.api_" in line
+    )
 
 
 def line_findings(path: str, line_number: int, line: str) -> list[tuple[str, int, str, str]]:

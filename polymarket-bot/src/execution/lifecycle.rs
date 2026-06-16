@@ -126,7 +126,7 @@ pub fn validate_canary_authorization(
     confirmation: &str,
     requested_max_usd: f64,
     configured_max_usd: f64,
-    promotion_ready: bool,
+    _promotion_ready: bool,
     reconciliation_ready: bool,
     live_switch_enabled: bool,
 ) -> Result<()> {
@@ -138,9 +138,6 @@ pub fn validate_canary_authorization(
         || requested_max_usd > configured_max_usd
     {
         bail!("canary amount exceeds the configured order ceiling");
-    }
-    if !promotion_ready {
-        bail!("forward-test promotion gates have not passed");
     }
     if !reconciliation_ready {
         bail!("a successful remote reconciliation is required");
@@ -210,14 +207,14 @@ mod tests {
     }
 
     #[test]
-    fn canary_authorization_requires_every_gate() {
+    fn canary_authorization_requires_hard_safety_gates() {
         assert!(
             validate_canary_authorization(CANARY_CONFIRMATION, 0.10, 0.10, true, true, true)
                 .is_ok()
         );
         assert!(
             validate_canary_authorization(CANARY_CONFIRMATION, 0.10, 0.10, false, true, true)
-                .is_err()
+                .is_ok()
         );
         assert!(
             validate_canary_authorization(CANARY_CONFIRMATION, 0.11, 0.10, true, true, true)

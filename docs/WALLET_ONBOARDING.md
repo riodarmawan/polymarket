@@ -1,8 +1,9 @@
 # Production Wallet Onboarding
 
-The application is ready for production-paper operation, not live-money
-execution. Live order placement remains intentionally unavailable until the
-remaining implementation phases and go-live gates pass.
+The application defaults to production-paper operation. Live-money execution is
+an explicit operator action and requires a new uncompromised wallet, locked
+local secrets, live environment confirmations, and all production hard gates to
+pass.
 
 ## Required Identities And Credentials
 
@@ -11,7 +12,7 @@ remaining implementation phases and go-live gates pass.
 | Owner/session signer EOA address | Public identity that signs wallet batches and orders | No |
 | Owner/session signer private key | Signs actions for the dedicated trading identity | Yes |
 | Polymarket deposit wallet address | Holds pUSD and outcome tokens; fund this address | No |
-| Relayer API key and key address | Deploys and operates the deposit wallet gaslessly | Yes / No |
+| Relayer API key, secret, passphrase, and key address | Deploys and operates the deposit wallet gaslessly | Yes / No / No / No |
 | CLOB L2 key, secret, and passphrase | Authenticates order API requests | Yes |
 | Polygon RPC URL | Connects to Polygon; provider token may be sensitive | Usually |
 
@@ -64,8 +65,9 @@ POLYMARKET_SECRET_FILE=/secure/path/polymarket-production.env \
   ./deploy/init-production-secrets.sh
 ```
 
-Keep `POLYMARKET_LIVE_TRADING_ENABLED=disabled`. The secret file is not needed
-for production-paper mode.
+Keep `POLYMARKET_LIVE_TRADING_ENABLED=disabled` until wallet onboarding,
+reconciliation, and operator authorization are complete. The secret file is not
+needed for production-paper mode.
 
 ## Official References
 

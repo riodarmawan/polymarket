@@ -254,6 +254,7 @@ pub struct SignalInfo {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub config: Config,
     pub store: DashboardStore,
     pub runtime: RuntimeInfo,
     pub price: Arc<RwLock<PriceData>>,
@@ -285,14 +286,19 @@ impl AppState {
             stats_5m: StatsInfo::with_capital(config.general.initial_capital),
         });
         let runtime = RuntimeInfo::from_config(config);
-        if !snapshot.settings.respects(&runtime) {
+        let mut settings = snapshot.settings;
+        if settings.max_order < runtime.configured_min_order_usd {
+            settings.max_order = runtime.configured_max_order_usd;
+        }
+        if !settings.respects(&runtime) {
             anyhow::bail!("restored dashboard settings exceed the active configuration limits");
         }
         let state = Self {
+            config: config.clone(),
             store,
             runtime,
             price: Arc::new(RwLock::new(PriceData::default())),
-            settings: Arc::new(RwLock::new(snapshot.settings)),
+            settings: Arc::new(RwLock::new(settings)),
             trades: Arc::new(RwLock::new(snapshot.trades)),
             stats: Arc::new(RwLock::new(snapshot.stats_15m)),
             stats_5m: Arc::new(RwLock::new(snapshot.stats_5m)),
@@ -388,6 +394,25 @@ impl AppState {
             .await
     }
 
+    pub async fn record_risk_decision_with_context(
+        &self,
+        market_slug: &str,
+        timeframe: &str,
+        decision: &RiskDecision,
+        context: serde_json::Value,
+    ) -> Result<()> {
+        self.store
+            .record_risk_decision_with_context(
+                market_slug,
+                timeframe,
+                &self.runtime.mode,
+                &self.runtime.strategy_version,
+                decision,
+                context,
+            )
+            .await
+    }
+
     pub async fn record_forward_opportunity(
         &self,
         market: &UpDownMarket,
@@ -421,6 +446,10 @@ impl AppState {
         let opportunities = self.store.load_forward_opportunities().await?;
         let trades = self.trades.read().await.clone();
         Ok(build_report(&opportunities, &trades))
+    }
+
+    pub async fn execution_audit(&self, limit: i64) -> Result<Vec<serde_json::Value>> {
+        self.store.load_execution_audit(limit).await
     }
 
     pub async fn halt_after_persistence_failure(&self, context: &str, error: &anyhow::Error) {

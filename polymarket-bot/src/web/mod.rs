@@ -87,6 +87,15 @@ pub async fn run_web_server(port: u16, config: &Config) -> anyhow::Result<()> {
             "/api/forward-report",
             axum::routing::get(api::get_forward_report),
         )
+        .route(
+            "/api/execution-audit",
+            axum::routing::get(api::get_execution_audit),
+        )
+        .route(
+            "/api/production-readiness",
+            axum::routing::get(api::get_production_readiness),
+        )
+        .route("/api/account", axum::routing::get(api::get_remote_account))
         .route("/api/health", axum::routing::get(api::get_health))
         .route("/api/settings", axum::routing::get(api::get_settings))
         .route("/api/settings", axum::routing::post(api::update_settings))
@@ -695,6 +704,7 @@ async fn settle_finished_trades(state: &AppState) {
 
     let mut trades = state.trades.write().await;
     let mut stats = state.stats.write().await;
+    let mut stats_5m = state.stats_5m.write().await;
     let mut changed = false;
 
     for trade in trades
@@ -721,6 +731,10 @@ async fn settle_finished_trades(state: &AppState) {
 
     if changed {
         refresh_stats(&mut stats, &trades, "15m");
+        stats_5m.current_capital = stats.current_capital;
+        stats_5m.peak_capital = stats_5m.peak_capital.max(stats.current_capital);
+        refresh_stats(&mut stats_5m, &trades, "5m");
+        drop(stats_5m);
         drop(stats);
         drop(trades);
         if let Err(error) = state
@@ -759,7 +773,8 @@ async fn settle_finished_5m_trades(state: &AppState) {
     }
 
     let mut trades = state.trades.write().await;
-    let mut stats = state.stats_5m.write().await;
+    let mut stats = state.stats.write().await;
+    let mut stats_5m = state.stats_5m.write().await;
     let mut changed = false;
     for trade in trades
         .iter_mut()
@@ -780,7 +795,11 @@ async fn settle_finished_5m_trades(state: &AppState) {
         changed = true;
     }
     if changed {
-        refresh_stats(&mut stats, &trades, "5m");
+        refresh_stats(&mut stats, &trades, "15m");
+        stats_5m.current_capital = stats.current_capital;
+        stats_5m.peak_capital = stats_5m.peak_capital.max(stats.current_capital);
+        refresh_stats(&mut stats_5m, &trades, "5m");
+        drop(stats_5m);
         drop(stats);
         drop(trades);
         if let Err(error) = state
@@ -859,11 +878,8 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
     };
 
     let mut trades = state.trades.write().await;
-    let mut stats = if timeframe == "5m" {
-        state.stats_5m.write().await
-    } else {
-        state.stats.write().await
-    };
+    let mut stats = state.stats.write().await;
+    let mut stats_5m = state.stats_5m.write().await;
     let size_usd = (stats.current_capital * settings.risk_fraction)
         .max(state.runtime.configured_min_order_usd)
         .min(settings.max_order);
@@ -872,16 +888,25 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
         .map(|bps| size_usd * bps as f64 / 10_000.0)
         .unwrap_or(size_usd * state.runtime.configured_fee_pct);
     let (min_price, max_price, min_margin, entry_start, entry_end) = if timeframe == "5m" {
-        (0.15, 0.62, 0.08, 60, 90)
+        (0.05, 0.62, 0.08, 60, 150)
     } else {
-        (0.50, settings.max_entry_price, settings.min_edge, 180, 210)
+        (0.15, settings.max_entry_price, settings.min_edge, 180, 300)
     };
+    let mut risk_stats = if timeframe == "5m" {
+        stats_5m.clone()
+    } else {
+        stats.clone()
+    };
+    risk_stats.current_capital = stats.current_capital;
+    risk_stats.peak_capital = risk_stats.peak_capital.max(stats.peak_capital);
+    risk_stats.max_drawdown = risk_stats.max_drawdown.max(stats.max_drawdown);
+
     let risk_decision = evaluate_trade_risk(
         state,
         &market,
         &signal,
         &trades,
-        &stats,
+        &risk_stats,
         size_usd,
         fee_usd,
         min_price,
@@ -890,8 +915,61 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
         entry_start,
         entry_end,
     );
+    let direction = Direction::parse(&signal.direction);
+    let expected_fill_price = match direction {
+        Some(Direction::Up) => market.up_expected_fill_price,
+        Some(Direction::Down) => market.down_expected_fill_price,
+        None => None,
+    };
+    let expected_shares = expected_fill_price
+        .filter(|price| *price > 0.0)
+        .map(|price| size_usd / price);
+    let min_required_usd = match (expected_fill_price, market.min_order_size) {
+        (Some(price), Some(minimum_shares)) => Some(price * minimum_shares),
+        _ => None,
+    };
+    let audit_now_ms = chrono::Utc::now().timestamp_millis();
+    let risk_context = serde_json::json!({
+        "signal": {
+            "direction": signal.direction.clone(),
+            "confidence": signal.confidence,
+            "reason": signal.reason.clone(),
+            "timestamp_ms": signal.timestamp,
+            "window_start_ts": signal.window_start_ts
+        },
+        "sizing": {
+            "requested_usd": size_usd,
+            "fee_usd": fee_usd,
+            "current_capital_usd": risk_stats.current_capital,
+            "max_order_usd": settings.max_order,
+            "configured_max_order_usd": state.runtime.configured_max_order_usd,
+            "min_balance_reserve_usd": state.runtime.configured_min_balance_reserve_usd,
+            "expected_fill_price": expected_fill_price,
+            "expected_shares": expected_shares,
+            "min_order_size_shares": market.min_order_size,
+            "min_required_usd": min_required_usd
+        },
+        "entry_rules": {
+            "min_entry_price": min_price,
+            "max_entry_price": max_price,
+            "min_model_margin": min_margin,
+            "entry_window_start_secs": entry_start,
+            "entry_window_end_secs": entry_end,
+            "elapsed_secs": audit_now_ms / 1_000 - market.start_ts
+        },
+        "market_snapshot": {
+            "data_status": market.data_status.as_str(),
+            "data_detail": market.data_detail,
+            "data_age_ms": audit_now_ms - market.captured_at_ms,
+            "spread": market.spread,
+            "fee_rate_bps": market.fee_rate_bps,
+            "up_depth_usd": market.up_executable_depth_usd,
+            "down_depth_usd": market.down_executable_depth_usd,
+            "clock_drift_ms": market.clock_drift_ms
+        }
+    });
     let persistence_result = match state
-        .record_risk_decision(&market.slug, timeframe, &risk_decision)
+        .record_risk_decision_with_context(&market.slug, timeframe, &risk_decision, risk_context)
         .await
     {
         Ok(()) => {
@@ -902,6 +980,7 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
         Err(error) => Err(error),
     };
     if let Err(error) = persistence_result {
+        drop(stats_5m);
         drop(stats);
         drop(trades);
         state
@@ -916,6 +995,9 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
         return;
     }
     let Some(intent) = risk_decision.intent.as_ref() else {
+        drop(stats_5m);
+        drop(stats);
+        drop(trades);
         set_timeframe_note(
             state,
             timeframe,
@@ -927,6 +1009,9 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
     match state.reserve_execution_intent(intent).await {
         Ok(true) => {}
         Ok(false) => {
+            drop(stats_5m);
+            drop(stats);
+            drop(trades);
             set_timeframe_note(
                 state,
                 timeframe,
@@ -936,6 +1021,7 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
             return;
         }
         Err(error) => {
+            drop(stats_5m);
             drop(stats);
             drop(trades);
             state
@@ -944,6 +1030,15 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
             set_timeframe_note(state, timeframe, "HALT: failed to persist execution intent").await;
             return;
         }
+    }
+
+    if auto_live_execution_enabled() {
+        let intent = intent.clone();
+        drop(stats_5m);
+        drop(stats);
+        drop(trades);
+        submit_armed_live_signal(state, timeframe, &signal.direction, &intent).await;
+        return;
     }
 
     let ask = intent.expected_fill_price.as_f64();
@@ -966,7 +1061,11 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
         pnl: None,
         status: "open".to_string(),
     });
-    refresh_stats(&mut stats, &trades, timeframe);
+    refresh_stats(&mut stats, &trades, "15m");
+    stats_5m.current_capital = stats.current_capital;
+    stats_5m.peak_capital = stats_5m.peak_capital.max(stats.current_capital);
+    refresh_stats(&mut stats_5m, &trades, "5m");
+    drop(stats_5m);
     drop(stats);
     drop(trades);
     if let Err(error) = state
@@ -998,6 +1097,98 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
         ),
     )
     .await;
+}
+
+fn auto_live_execution_enabled() -> bool {
+    std::env::var("POLYMARKET_AUTO_LIVE_EXECUTION")
+        .map(|value| value == "I_UNDERSTAND_AUTO_LIVE_EXECUTION")
+        .unwrap_or(false)
+}
+
+async fn submit_armed_live_signal(
+    state: &AppState,
+    timeframe: &str,
+    direction: &str,
+    intent: &crate::engine::risk::ExecutionIntent,
+) {
+    if let Err(error) = crate::production::run_preflight(&state.config).await {
+        set_timeframe_note(
+            state,
+            timeframe,
+            &format!("HALT: live preflight failed before submit: {error}"),
+        )
+        .await;
+        return;
+    }
+    match state.store.latest_reconciliation_ready().await {
+        Ok(true) => {}
+        Ok(false) => {
+            set_timeframe_note(
+                state,
+                timeframe,
+                "HALT: fresh reconciliation required before live submit",
+            )
+            .await;
+            return;
+        }
+        Err(error) => {
+            state
+                .halt_after_persistence_failure("live reconciliation readiness query", &error)
+                .await;
+            set_timeframe_note(
+                state,
+                timeframe,
+                "HALT: failed to verify reconciliation readiness",
+            )
+            .await;
+            return;
+        }
+    }
+
+    let executor = crate::execution::live::SdkOrderExecutor::new(
+        state.config.execution.heartbeat_interval_secs,
+        state.config.risk.max_fee_rate_bps,
+        state.config.risk.min_balance_reserve_usd,
+    );
+    match crate::execution::live::execute_armed_signal(&state.store, &executor, intent).await {
+        Ok(outcome) => {
+            set_timeframe_note(
+                state,
+                timeframe,
+                &format!(
+                    "LIVE BUY {direction} submitted: status={} order_id={}",
+                    outcome.status, outcome.order_id
+                ),
+            )
+            .await;
+        }
+        Err(error) => {
+            let _ = state
+                .store
+                .set_runtime_state(
+                    "halted",
+                    "armed live signal submission requires reconciliation",
+                )
+                .await;
+            let _ = state
+                .store
+                .open_incident(
+                    &format!("armed-live-submit-{}", chrono::Utc::now().timestamp()),
+                    "ambiguous_order_submission",
+                    serde_json::json!({
+                        "client_key": intent.client_order_key,
+                        "error": error.to_string()
+                    }),
+                )
+                .await;
+            set_timeframe_note(
+                state,
+                timeframe,
+                &format!("HALT: live submit failed; reconciliation required: {error}"),
+            )
+            .await;
+        }
+    }
 }
 
 async fn set_timeframe_note(state: &AppState, timeframe: &str, note: &str) {

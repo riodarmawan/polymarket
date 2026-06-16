@@ -202,7 +202,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 "type": "stats",
                 "15m": stats_to_json(&stats),
                 "5m": stats_to_json(&stats_5m),
-                "current_capital": stats.current_capital + stats_5m.current_capital
+                "current_capital": stats.current_capital,
+                "capital_source": "shared"
             });
             if sender
                 .send(Message::Text(msg.to_string().into()))

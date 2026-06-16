@@ -3,135 +3,235 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Trading Dashboard</title>
+    <title>Polymarket Production Operator</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        .green { color: #22c55e; }
-        .red { color: #ef4444; }
-        .cyan { color: #06b6d4; }
-        .yellow { color: #eab308; }
-        .pulse { animation: pulse 1s infinite; }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
+        :root {
+            --bg: #0b0d10;
+            --surface: #14171c;
+            --surface-2: #191d23;
+            --surface-3: #20252d;
+            --border: #2a3039;
+            --muted: #8e99a8;
+            --text: #eef2f6;
+            --green: #28c76f;
+            --red: #ff5d5d;
+            --amber: #f5b84b;
+            --cyan: #5ad7ff;
         }
+        body { background: var(--bg); color: var(--text); }
+        .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+        .panel-soft { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; }
+        .metric { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; min-height: 72px; }
+        .label { color: var(--muted); font-size: 0.72rem; font-weight: 700; letter-spacing: 0; text-transform: uppercase; }
+        .green { color: var(--green); }
+        .red { color: var(--red); }
+        .cyan { color: var(--cyan); }
+        .yellow { color: var(--amber); }
+        .pill { border: 1px solid var(--border); border-radius: 999px; padding: 0.12rem 0.5rem; font-size: 0.72rem; white-space: nowrap; }
+        .input { background: #0f1216; border: 1px solid var(--border); border-radius: 6px; color: var(--text); min-height: 34px; padding: 0 0.55rem; }
+        .btn { border: 1px solid var(--border); border-radius: 6px; min-height: 34px; padding: 0 0.75rem; background: var(--surface-3); color: var(--text); }
+        .btn:hover { border-color: #4b5563; background: #252b34; }
+        .btn-primary { background: #0f766e; border-color: #0d9488; }
+        .btn-primary:hover { background: #0d9488; }
+        .btn-success { background: #166534; border-color: #22c55e; }
+        .audit-table th { color: var(--muted); font-weight: 700; text-align: left; padding: 0.65rem 0.75rem; border-bottom: 1px solid var(--border); background: #101318; position: sticky; top: 0; }
+        .audit-table td { padding: 0.7rem 0.75rem; border-bottom: 1px solid #222831; vertical-align: top; }
+        .audit-table tr:hover td { background: rgba(255,255,255,0.025); }
+        .pulse { animation: pulse 1s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
     </style>
 </head>
-<body class="bg-gray-900 text-white min-h-screen">
-    <div class="container mx-auto p-4">
-        <!-- Header -->
-        <div class="bg-gray-800 rounded-lg p-4 mb-4 flex justify-between items-center">
-            <h1 class="text-xl font-bold cyan">LIVE TRADING DASHBOARD</h1>
-            <div class="text-right">
-                <div id="data-health" class="text-yellow-400 text-sm font-bold">DATA STARTING</div>
-                <div class="text-green-400 font-bold">
-                    Combined Paper Capital: $<span id="capital">4.00</span>
+<body class="min-h-screen">
+    <div class="max-w-[1600px] mx-auto p-4 lg:p-5">
+        <header class="panel p-4 mb-4">
+            <div class="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                <div>
+                    <div class="label">Production Console</div>
+                    <h1 class="text-2xl font-bold mt-1">Polymarket Trading Operator</h1>
+                    <div id="runtime-status" class="text-xs text-gray-400 mt-1">runtime checking...</div>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 xl:min-w-[650px]">
+                    <div class="panel-soft p-3">
+                        <div class="label">Data Plane</div>
+                        <div id="data-health" class="text-sm font-bold yellow mt-1">DATA STARTING</div>
+                    </div>
+                    <div class="panel-soft p-3">
+                        <div class="label">Shared Capital</div>
+                        <div class="text-lg font-bold green mt-1">$<span id="capital">2.00</span></div>
+                    </div>
+                    <div class="panel-soft p-3">
+                        <div class="label">BTC/USDT</div>
+                        <div class="text-lg font-bold mt-1">$<span id="btc-price">0.00</span> <span id="btc-change" class="text-sm">+0.00%</span></div>
+                        <div class="text-xs text-gray-500">Source: <span id="price-source">unknown</span></div>
+                    </div>
                 </div>
             </div>
-        </div>
+        </header>
 
-        <!-- Price & Signal Row -->
-        <div class="grid grid-cols-3 gap-4 mb-4">
-            <!-- BTC Price -->
-            <div class="bg-gray-800 rounded-lg p-4">
-                <h2 class="text-sm text-gray-400 mb-2">BTC/USDT</h2>
-                <div class="text-2xl font-bold">$<span id="btc-price">0.00</span></div>
-                <div id="btc-change" class="text-sm">+0.00%</div>
-                <div class="text-xs text-gray-500 mt-1">Source: <span id="price-source">unknown</span></div>
+        <section class="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-4">
+            <div class="panel p-4">
+                <div class="label mb-2">Polymarket Account</div>
+                <div id="account-status" class="text-sm yellow">Checking remote account...</div>
+                <div class="grid grid-cols-2 gap-2 text-xs text-gray-300 mt-3">
+                    <div class="metric">Balance<br><b id="remote-balance" class="text-lg green">-</b></div>
+                    <div class="metric">Allowances<br><b id="remote-allowances" class="text-lg">-</b></div>
+                    <div class="metric">Open Orders<br><b id="remote-open-orders" class="text-lg">-</b></div>
+                    <div class="metric">Positions<br><b id="remote-positions" class="text-lg">-</b></div>
+                </div>
             </div>
-
-            <!-- Signal -->
-            <div class="bg-gray-800 rounded-lg p-4">
-                <h2 class="text-sm text-gray-400 mb-2">SIGNAL 15M</h2>
-                <div id="signal" class="text-lg font-bold">Waiting for signal...</div>
-                <div id="signal-details" class="text-xs text-gray-500 mt-1"></div>
+            <div class="panel p-4">
+                <div class="label mb-2">Canary Readiness</div>
+                <div id="canary-status" class="text-sm yellow">Checking gates...</div>
+                <div id="canary-blockers" class="text-xs text-gray-400 mt-2 max-h-32 overflow-y-auto"></div>
             </div>
-
-            <div class="bg-gray-800 rounded-lg p-4 border border-purple-900">
-                <h2 class="text-sm text-purple-400 mb-2">SIGNAL 5M CONTINUATION</h2>
-                <div id="signal-5m" class="text-lg font-bold">Waiting for signal...</div>
-                <div id="signal-5m-details" class="text-xs text-gray-500 mt-1"></div>
+            <div class="panel p-4">
+                <div class="label mb-2">Forward Promotion</div>
+                <div id="forward-status" class="text-sm yellow">Checking metrics...</div>
+                <div id="forward-detail" class="text-xs text-gray-400 mt-2"></div>
             </div>
-        </div>
+            <div class="panel p-4">
+                <div class="label mb-2">Rejection Summary</div>
+                <div id="rejection-summary" class="text-xs text-gray-400 max-h-32 overflow-y-auto">Waiting for risk decisions...</div>
+            </div>
+        </section>
 
-        <!-- Crypto Up/Down Markets -->
-        <div class="grid grid-cols-2 gap-4 mb-4">
-            <div class="bg-gray-800 rounded-lg p-4">
-                <h2 class="text-sm text-gray-400 mb-2">CRYPTO UP/DOWN 15M MARKETS</h2>
+        <section class="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-4">
+            <div class="panel p-4">
+                <div class="label mb-2">Signal 15m</div>
+                <div id="signal" class="text-xl font-bold">Waiting for signal...</div>
+                <div id="signal-details" class="text-xs text-gray-500 mt-2"></div>
+            </div>
+            <div class="panel p-4">
+                <div class="label mb-2">Signal 5m Continuation</div>
+                <div id="signal-5m" class="text-xl font-bold">Waiting for signal...</div>
+                <div id="signal-5m-details" class="text-xs text-gray-500 mt-2"></div>
+            </div>
+            <div class="panel p-4">
+                <div class="label mb-2">Model Snapshot</div>
+                <div id="model-risk-snapshot" class="text-xs text-gray-400">Waiting for model state...</div>
+            </div>
+        </section>
+
+        <section class="panel mb-4">
+            <div class="p-4 border-b border-[#2a3039]">
+                <div class="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+                    <div>
+                        <div class="label">Execution Audit</div>
+                        <div id="execution-audit-status" class="text-xs text-gray-500 mt-1">Loading risk decision log...</div>
+                    </div>
+                    <div class="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                        <label>
+                            <span class="label block mb-1">Timeframe</span>
+                            <select id="audit-filter-timeframe" class="input w-full">
+                                <option value="all">All</option>
+                                <option value="5m">5m</option>
+                                <option value="15m">15m</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span class="label block mb-1">Status</span>
+                            <select id="audit-filter-status" class="input w-full">
+                                <option value="all">All</option>
+                                <option value="approved">Approved</option>
+                                <option value="rejected">Rejected</option>
+                            </select>
+                        </label>
+                        <label class="md:col-span-2">
+                            <span class="label block mb-1">Reason Search</span>
+                            <input id="audit-filter-reason" class="input w-full" placeholder="entry_price, market_data...">
+                        </label>
+                        <label>
+                            <span class="label block mb-1">Rows</span>
+                            <select id="audit-page-size" class="input w-full">
+                                <option value="10">10</option>
+                                <option value="15" selected>15</option>
+                                <option value="25">25</option>
+                            </select>
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="overflow-x-auto max-h-[560px]">
+                <table class="audit-table w-full text-xs">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>TF</th>
+                            <th>Signal</th>
+                            <th>Approval</th>
+                            <th>Failed Check</th>
+                            <th>Market Data</th>
+                            <th>Execution Inputs</th>
+                        </tr>
+                    </thead>
+                    <tbody id="execution-audit-table">
+                        <tr><td colspan="7" class="text-gray-500">No audit rows loaded yet</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="p-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between border-t border-[#2a3039] text-xs">
+                <div id="audit-page-info" class="text-gray-400">Page 1</div>
+                <div class="flex gap-2">
+                    <button id="audit-prev" class="btn">Prev</button>
+                    <button id="audit-next" class="btn">Next</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
+            <div class="panel p-4">
+                <div class="label mb-2">Crypto Up/Down 15m Markets</div>
                 <div id="updown-container" class="space-y-2">
                     <div class="text-gray-500">Scanning markets...</div>
                 </div>
             </div>
-            <div class="bg-gray-800 rounded-lg p-4 border border-purple-900">
-                <h2 class="text-sm text-purple-400 mb-2">BTC UP/DOWN 5M MARKET</h2>
+            <div class="panel p-4">
+                <div class="label mb-2">BTC Up/Down 5m Market</div>
                 <div id="updown-5m-container" class="space-y-2">
                     <div class="text-gray-500">Scanning 5m market...</div>
                 </div>
             </div>
-        </div>
+        </section>
 
-        <!-- Stats -->
-        <div class="grid grid-cols-2 gap-4 mb-4">
-            <div class="bg-gray-800 rounded-lg p-4">
-                <h2 class="text-sm text-gray-400 mb-2">15M PAPER STATS</h2>
-                <div id="stats-15m" class="grid grid-cols-3 gap-3 text-sm"></div>
+        <section class="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
+            <div class="panel p-4">
+                <div class="label mb-2">15m Strategy Stats</div>
+                <div id="stats-15m" class="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm"></div>
             </div>
-            <div class="bg-gray-800 rounded-lg p-4 border border-purple-900">
-                <h2 class="text-sm text-purple-400 mb-2">5M PAPER STATS</h2>
-                <div id="stats-5m" class="grid grid-cols-3 gap-3 text-sm"></div>
+            <div class="panel p-4">
+                <div class="label mb-2">5m Strategy Stats</div>
+                <div id="stats-5m" class="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm"></div>
             </div>
-        </div>
+        </section>
 
-        <!-- Trade History -->
-        <div class="bg-gray-800 rounded-lg p-4 mb-4">
-            <h2 class="text-sm text-gray-400 mb-2">TRADE HISTORY</h2>
-            <div id="trade-history" class="text-sm max-h-48 overflow-y-auto">
-                <div class="text-gray-500">No trades yet</div>
-            </div>
-        </div>
-
-        <!-- Settings & Risk -->
-        <div class="grid grid-cols-2 gap-4">
-            <!-- Settings -->
-            <div class="bg-gray-800 rounded-lg p-4">
-                <h2 class="text-sm text-gray-400 mb-2">SETTINGS</h2>
-                <div class="space-y-2 text-sm">
-                    <div class="flex justify-between">
-                        <span>Capital:</span>
-                        <input id="setting-capital" type="number" value="2.0" class="bg-gray-700 rounded px-2 w-24">
-                    </div>
-                    <div class="flex justify-between">
-                        <span>Max Order:</span>
-                        <input id="setting-max-order" type="number" value="0.5" class="bg-gray-700 rounded px-2 w-24">
-                    </div>
-                    <div class="flex justify-between">
-                        <span>Auto-trade:</span>
-                        <input id="setting-auto-trade" type="checkbox" checked class="rounded">
-                    </div>
-                    <button id="save-settings" class="bg-blue-600 hover:bg-blue-700 rounded px-4 py-1 w-full mt-2">Save</button>
+        <section class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+            <div class="panel p-4 xl:col-span-1">
+                <div class="label mb-2">Trade History</div>
+                <div id="trade-history" class="text-sm max-h-64 overflow-y-auto">
+                    <div class="text-gray-500">No trades yet</div>
                 </div>
             </div>
-
-            <!-- Risk Management -->
-            <div class="bg-gray-800 rounded-lg p-4">
-                <h2 class="text-sm text-gray-400 mb-2">RISK MANAGEMENT</h2>
-                <div class="space-y-2 text-sm">
-                    <div class="flex justify-between">
-                        <span>Minimum Model Margin %:</span>
-                        <input id="setting-min-edge" type="number" value="10" step="1" class="bg-gray-700 rounded px-2 w-24">
-                    </div>
-                    <div class="flex justify-between">
-                        <span>Maximum Ask:</span>
-                        <input id="setting-max-entry" type="number" value="0.60" step="0.01" class="bg-gray-700 rounded px-2 w-24">
-                    </div>
-                    <div class="flex justify-between">
-                        <span>Risk / Trade %:</span>
-                        <input id="setting-risk" type="number" value="5" step="1" class="bg-gray-700 rounded px-2 w-24">
-                    </div>
-                    <button id="export-trades" class="bg-green-600 hover:bg-green-700 rounded px-4 py-1 w-full mt-2">Export Trades</button>
+            <div class="panel p-4">
+                <div class="label mb-2">Settings</div>
+                <div class="space-y-3 text-sm">
+                    <div class="flex justify-between gap-3 items-center"><span>Capital</span><input id="setting-capital" type="number" value="2.0" class="input w-28"></div>
+                    <div class="flex justify-between gap-3 items-center"><span>Max Order</span><input id="setting-max-order" type="number" value="0.5" class="input w-28"></div>
+                    <label class="flex justify-between gap-3 items-center"><span>Auto-trade</span><input id="setting-auto-trade" type="checkbox" checked></label>
+                    <button id="save-settings" class="btn btn-primary w-full">Save Settings</button>
+                    <div id="settings-save-status" class="text-xs text-gray-500"></div>
                 </div>
             </div>
-        </div>
+            <div class="panel p-4">
+                <div class="label mb-2">Risk Management</div>
+                <div class="space-y-3 text-sm">
+                    <div class="flex justify-between gap-3 items-center"><span>Minimum Model Margin %</span><input id="setting-min-edge" type="number" value="10" step="1" class="input w-28"></div>
+                    <div class="flex justify-between gap-3 items-center"><span>Maximum Ask</span><input id="setting-max-entry" type="number" value="0.60" step="0.01" class="input w-28"></div>
+                    <div class="flex justify-between gap-3 items-center"><span>Risk / Trade %</span><input id="setting-risk" type="number" value="5" step="1" class="input w-28"></div>
+                    <button id="export-trades" class="btn btn-success w-full">Export Trades</button>
+                </div>
+            </div>
+        </section>
     </div>
 
     <script src="app.js"></script>

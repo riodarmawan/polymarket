@@ -157,6 +157,9 @@ pub async fn get_health(State(state): State<AppState>) -> axum::Json<Value> {
             "reconciliation_ready": reconciliation_ready,
             "live_switch_enabled": std::env::var("POLYMARKET_LIVE_TRADING_ENABLED")
                 .map(|value| value == "I_UNDERSTAND_LIVE_TRADING")
+                .unwrap_or(false),
+            "auto_live_execution_enabled": std::env::var("POLYMARKET_AUTO_LIVE_EXECUTION")
+                .map(|value| value == "I_UNDERSTAND_AUTO_LIVE_EXECUTION")
                 .unwrap_or(false)
         }
     }))
@@ -233,7 +236,8 @@ pub async fn get_stats(State(state): State<AppState>) -> axum::Json<Value> {
     axum::Json(json!({
         "15m": stats_json(&stats),
         "5m": stats_json(&stats_5m),
-        "current_capital": stats.current_capital + stats_5m.current_capital
+        "current_capital": stats.current_capital,
+        "capital_source": "shared"
     }))
 }
 
@@ -250,6 +254,69 @@ pub async fn get_forward_report(State(state): State<AppState>) -> (StatusCode, a
             StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(json!({"error": error.to_string()})),
         ),
+    }
+}
+
+pub async fn get_execution_audit(State(state): State<AppState>) -> (StatusCode, axum::Json<Value>) {
+    match state.execution_audit(100).await {
+        Ok(rows) => (
+            StatusCode::OK,
+            axum::Json(json!({
+                "rows": rows,
+                "limit": 100
+            })),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({"error": error.to_string()})),
+        ),
+    }
+}
+
+pub async fn get_production_readiness(
+    State(state): State<AppState>,
+) -> (StatusCode, axum::Json<Value>) {
+    let report = crate::production::build_readiness_report(&state.config).await;
+    (
+        StatusCode::OK,
+        axum::Json(
+            serde_json::to_value(report)
+                .unwrap_or_else(|_| json!({"error": "serialization failed"})),
+        ),
+    )
+}
+
+pub async fn get_remote_account(State(_state): State<AppState>) -> (StatusCode, axum::Json<Value>) {
+    match crate::execution::dry_signed::reconcile_from_environment().await {
+        Ok(remote) => (
+            StatusCode::OK,
+            axum::Json(json!({
+                "connected": true,
+                "remote_checked": remote.remote_checked,
+                "collateral_balance": remote.collateral_balance,
+                "collateral_balance_usd": collateral_balance_usd(&remote.collateral_balance),
+                "allowance_contracts": remote.allowance_contracts,
+                "open_orders": remote.open_orders,
+                "recent_trades": remote.recent_trades,
+                "positions": remote.positions
+            })),
+        ),
+        Err(error) => (
+            StatusCode::OK,
+            axum::Json(json!({
+                "connected": false,
+                "reason": error.to_string()
+            })),
+        ),
+    }
+}
+
+fn collateral_balance_usd(raw: &str) -> Option<f64> {
+    let value = raw.parse::<f64>().ok()?;
+    if value.abs() >= 10_000.0 {
+        Some(value / 1_000_000.0)
+    } else {
+        Some(value)
     }
 }
 

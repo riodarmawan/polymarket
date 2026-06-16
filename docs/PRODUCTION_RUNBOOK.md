@@ -2,10 +2,10 @@
 
 ## Current Status
 
-The supervised dashboard remains paper-only. Live FOK submission code exists
-only behind explicit CLI confirmations, one-time authorization, promotion,
-preflight, and reconciliation gates. Do not invoke it until every gate below
-passes.
+The supervised dashboard defaults to paper mode. Operator-live execution is
+available only when the local live environment confirmations are set and the
+hard production gates pass. Forward promotion and canary evidence are
+observational review inputs, not blockers for the auto-live path.
 
 Implementation sequence, architecture changes, and acceptance criteria are
 defined in [PRODUCTION_IMPLEMENTATION_PLAN.md](PRODUCTION_IMPLEMENTATION_PLAN.md).
@@ -252,26 +252,27 @@ Do not bypass a failed geoblock check or use a VPN to evade restrictions.
 ## $2 Capital Guards
 
 - One open position across both strategies.
-- First live order: maximum `$0.10`.
+- Live order size: `$0.50`, matching Polymarket's current minimum-size
+  constraint and the production strategy config.
 - Maximum daily realized loss: `$0.30`.
 - Maximum daily orders: `3`.
 - Stop after `3` consecutive losses.
 - No martingale, averaging down, or automatic risk increase.
 - Never place an order unless current book `min_order_size`, tick size, spread,
   balance, allowance, and fee rate have been fetched and validated.
-- If the market minimum cannot be satisfied with `$0.10`, skip the market.
+- If the market minimum cannot be satisfied with `$0.50`, skip the market.
 - Do not assume the backtest fee. Fetch the current fee rate for every token.
 
-## Go-Live Gates
+## Go-Live Evidence
 
-1. At least 200 forward-test paper trades using real CLOB asks.
-2. Win rate at least 68%, profit factor at least 1.40, drawdown at most 20%.
+1. Forward-test paper trades using real CLOB asks.
+2. Win rate, profit factor, and drawdown from the current forward report.
 3. No settlement mismatch between dashboard and official Polymarket outcome.
 4. Preflight passes on the actual deployment host.
 5. Deposit wallet pUSD balance and allowances confirmed.
 6. A signed order can be created locally without submission.
 7. Cancel-all and heartbeat failure behavior tested.
-8. First live order requires a manual one-time canary command.
+8. Auto-live remains armed only by explicit local environment confirmations.
 
 ## Forward-Test Evaluation
 
@@ -360,9 +361,8 @@ and backup never submit an order.
 ./target/release/polymarket-bot reconcile
 ```
 
-Canary authorization and submission remain unusable until every promotion gate,
-the latest remote reconciliation, production preflight, and operator review
-pass:
+Canary authorization commands are retained for reviewed manual drills. They are
+not the primary operator-live path:
 
 ```bash
 ./target/release/polymarket-bot authorize-canary \
@@ -385,8 +385,8 @@ Emergency and lifecycle commands:
 ./target/release/polymarket-bot cancel-all-live --confirm CANCEL_ALL_OPEN_ORDERS
 ```
 
-After any canary attempt, the runtime returns to `HALTED`; reconcile and review
-the incident/order history before doing anything else.
+After any manual canary attempt, the runtime returns to `HALTED`; reconcile and
+review the incident/order history before doing anything else.
 
 `plan-redemptions` only inventories redeemable positions and persists a durable
 plan. It does not submit a redemption transaction. POLY_1271 deposit-wallet

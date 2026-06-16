@@ -57,6 +57,19 @@ pub struct CryptoTrade {
 }
 
 #[derive(Debug, Clone)]
+struct CandidateTrade {
+    timestamp: i64,
+    timeframe: Timeframe,
+    direction: Direction,
+    entry_price: f64,
+    exit_price: f64,
+    market_price: f64,
+    won: bool,
+    confidence: f64,
+    edge: f64,
+}
+
+#[derive(Debug, Clone)]
 pub struct CryptoBacktestResult {
     pub initial_capital: f64,
     pub final_capital: f64,
@@ -113,14 +126,13 @@ impl CryptoBacktestEngine {
         let mut capital = config.initial_capital;
         let mut peak_capital = capital;
         let mut max_drawdown: f64 = 0.0;
+        let mut candidates = Vec::new();
         let mut trades = Vec::new();
         let mut diagnostics = ModelDiagnostics::default();
         let mut confidence_sum = 0.0;
         let mut brier_sum = 0.0;
         let mut first_half_correct = 0usize;
         let mut second_half_correct = 0usize;
-        let mut consecutive_m5_losses = 0usize;
-        let mut m5_pause_until = 0i64;
         let midpoint_ts = match (config.target_start_ts, config.target_end_ts) {
             (Some(start), Some(end)) => start + (end - start) / 2,
             _ => candles[candles.len() / 2].timestamp,
@@ -169,12 +181,6 @@ impl CryptoBacktestEngine {
                 if entry_index < 60 || entry_index >= candles.len() {
                     continue;
                 }
-                if *timeframe == Timeframe::M5
-                    && window[entry_minute - 1].timestamp < m5_pause_until
-                {
-                    continue;
-                }
-
                 let history_start = entry_index.saturating_sub(60);
                 let available_prices: Vec<f64> = candles[history_start..=entry_index]
                     .iter()
@@ -219,78 +225,93 @@ impl CryptoBacktestEngine {
                 };
                 let edge = signal.confidence - ask;
 
-                let current_drawdown = if peak_capital > 0.0 {
-                    (peak_capital - capital) / peak_capital
-                } else {
-                    0.0
-                };
-                if current_drawdown >= 0.25 {
-                    continue;
-                }
-
-                let drawdown_scale = if current_drawdown > 0.20 {
-                    0.50
-                } else if current_drawdown > 0.10 {
-                    0.75
-                } else {
-                    1.0
-                };
-                let risk_fraction = if *timeframe == Timeframe::M5 {
-                    0.03
-                } else {
-                    0.05
-                };
-                let max_order_usd = if *timeframe == Timeframe::M5 {
-                    config.max_order_usd.min(0.25)
-                } else {
-                    config.max_order_usd
-                };
-                let size_usd = (capital * risk_fraction * drawdown_scale)
-                    .max(config.min_order_usd)
-                    .min(max_order_usd)
-                    .min(capital);
-                if size_usd < config.min_order_usd || capital < size_usd {
-                    continue;
-                }
-
-                let won = signal_won;
-                let fee = size_usd * config.fee_pct;
-                let shares = size_usd / ask;
-                let pnl = if won {
-                    shares - size_usd - fee
-                } else {
-                    -size_usd - fee
-                };
-
-                capital = (capital + pnl).max(0.0);
-                peak_capital = peak_capital.max(capital);
-                if peak_capital > 0.0 {
-                    max_drawdown = max_drawdown.max((peak_capital - capital) / peak_capital);
-                }
-
-                trades.push(CryptoTrade {
+                candidates.push(CandidateTrade {
                     timestamp: window[entry_minute - 1].timestamp,
                     timeframe: *timeframe,
                     direction: signal.direction,
                     entry_price: entry_btc_price,
                     exit_price: final_btc_price,
                     market_price: ask,
-                    size_usd,
-                    pnl,
-                    won,
+                    won: signal_won,
                     confidence: signal.confidence,
                     edge,
                 });
+            }
+        }
 
-                if *timeframe == Timeframe::M5 {
-                    if won {
+        candidates.sort_by_key(|candidate| candidate.timestamp);
+        let mut consecutive_m5_losses = 0usize;
+        let mut m5_pause_until = 0i64;
+        for candidate in candidates {
+            if candidate.timeframe == Timeframe::M5 && candidate.timestamp < m5_pause_until {
+                continue;
+            }
+
+            let current_drawdown = if peak_capital > 0.0 {
+                (peak_capital - capital) / peak_capital
+            } else {
+                0.0
+            };
+            if current_drawdown >= 0.25 {
+                continue;
+            }
+
+            let drawdown_scale = if current_drawdown > 0.20 {
+                0.50
+            } else if current_drawdown > 0.10 {
+                0.75
+            } else {
+                1.0
+            };
+            let risk_fraction = if candidate.timeframe == Timeframe::M5 {
+                0.03
+            } else {
+                0.05
+            };
+            let size_usd = (capital * risk_fraction * drawdown_scale)
+                .max(config.min_order_usd)
+                .min(config.max_order_usd)
+                .min(capital);
+            if size_usd < config.min_order_usd || capital < size_usd {
+                continue;
+            }
+
+            let fee = size_usd * config.fee_pct;
+            let shares = size_usd / candidate.market_price;
+            let pnl = if candidate.won {
+                shares - size_usd - fee
+            } else {
+                -size_usd - fee
+            };
+
+            capital = (capital + pnl).max(0.0);
+            peak_capital = peak_capital.max(capital);
+            if peak_capital > 0.0 {
+                max_drawdown = max_drawdown.max((peak_capital - capital) / peak_capital);
+            }
+
+            trades.push(CryptoTrade {
+                timestamp: candidate.timestamp,
+                timeframe: candidate.timeframe,
+                direction: candidate.direction,
+                entry_price: candidate.entry_price,
+                exit_price: candidate.exit_price,
+                market_price: candidate.market_price,
+                size_usd,
+                pnl,
+                won: candidate.won,
+                confidence: candidate.confidence,
+                edge: candidate.edge,
+            });
+
+            if candidate.timeframe == Timeframe::M5 {
+                if candidate.won {
+                    consecutive_m5_losses = 0;
+                } else {
+                    consecutive_m5_losses += 1;
+                    if consecutive_m5_losses >= 3 {
+                        m5_pause_until = candidate.timestamp + 90 * 60 * 1000;
                         consecutive_m5_losses = 0;
-                    } else {
-                        consecutive_m5_losses += 1;
-                        if consecutive_m5_losses >= 3 {
-                            m5_pause_until = window[entry_minute - 1].timestamp + 90 * 60 * 1000;
-                            consecutive_m5_losses = 0;
-                        }
                     }
                 }
             }

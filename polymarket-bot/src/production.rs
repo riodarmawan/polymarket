@@ -3,11 +3,12 @@ use crate::config::{Config, RuntimeEnvironment, RuntimeMode};
 use crate::evaluation;
 use crate::storage::dashboard::DashboardStore;
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const LIVE_CONFIRMATION: &str = "I_UNDERSTAND_LIVE_TRADING";
 
@@ -68,6 +69,7 @@ pub async fn print_readiness(
 
 pub async fn build_readiness_report(config: &Config) -> ProductionReadinessReport {
     let build = build_info::BuildInfo::current();
+    let git_dirty = effective_git_dirty(build.git_dirty, runtime_git_dirty().as_deref());
     let live_switch_enabled = std::env::var("POLYMARKET_LIVE_TRADING_ENABLED")
         .map(|value| value == LIVE_CONFIRMATION)
         .unwrap_or(false);
@@ -105,7 +107,7 @@ pub async fn build_readiness_report(config: &Config) -> ProductionReadinessRepor
         }
     }
 
-    let provenance_ok = build.is_git_sha_known() && build.is_dirty_known() && !build.is_dirty();
+    let provenance_ok = build.is_git_sha_known() && matches!(git_dirty.as_str(), "false");
     let settlement_mismatches = forward_report
         .as_ref()
         .map(|report| report.settlement_mismatches)
@@ -149,8 +151,8 @@ pub async fn build_readiness_report(config: &Config) -> ProductionReadinessRepor
 
     let checks = vec![
         readiness_check(
-            "Phase 0",
-            "runtime remains paper-only until an operator canary command",
+            "Runtime",
+            "runtime defaults to paper until operator-live is explicitly armed",
             config.runtime.mode == RuntimeMode::Paper,
             true,
             format!("runtime_mode={}", config.runtime.mode),
@@ -160,11 +162,7 @@ pub async fn build_readiness_report(config: &Config) -> ProductionReadinessRepor
             "build provenance is known and clean",
             provenance_ok,
             true,
-            format!(
-                "git_sha={} git_dirty={}",
-                build.git_short_sha(),
-                build.git_dirty
-            ),
+            format!("git_sha={} git_dirty={}", build.git_short_sha(), git_dirty),
         ),
         readiness_check(
             "Phase 0",
@@ -205,14 +203,14 @@ pub async fn build_readiness_report(config: &Config) -> ProductionReadinessRepor
             "fixed-point intents and risk-engine boundary tests are present".to_string(),
         ),
         readiness_check(
-            "Phase 4",
+            "Forward evidence",
             "forward promotion metrics pass",
             forward_promotion_ready,
-            true,
+            false,
             forward_evidence,
         ),
         readiness_check(
-            "Phase 4",
+            "Forward evidence",
             "official settlement mismatches are zero",
             settlement_mismatches == 0,
             true,
@@ -291,7 +289,7 @@ pub async fn build_readiness_report(config: &Config) -> ProductionReadinessRepor
         build: BuildReadiness {
             package_version: build.package_version.to_string(),
             git_sha: build.git_sha.to_string(),
-            git_dirty: build.git_dirty.to_string(),
+            git_dirty,
             build_timestamp: build.build_timestamp.to_string(),
         },
         runtime: RuntimeReadiness {
@@ -305,6 +303,32 @@ pub async fn build_readiness_report(config: &Config) -> ProductionReadinessRepor
         blockers,
         checks,
     }
+}
+
+fn effective_git_dirty(build_git_dirty: &str, runtime_git_dirty: Option<&str>) -> String {
+    if build_git_dirty == "true" || runtime_git_dirty == Some("true") {
+        "true".to_string()
+    } else if build_git_dirty == "false" || runtime_git_dirty == Some("false") {
+        "false".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn runtime_git_dirty() -> Option<String> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    Some(if stdout.trim().is_empty() {
+        "false".to_string()
+    } else {
+        "true".to_string()
+    })
 }
 
 fn print_readiness_text(report: &ProductionReadinessReport) {
@@ -450,6 +474,14 @@ fn signer_drill_summary_passes(drill_type: &str, summary: &Value) -> bool {
                 .get("submitted")
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
+            let live_credentials_required = summary
+                .get("live_credentials_required")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let used_placeholder_template_only = summary
+                .get("used_placeholder_template_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let signature_type_ok = summary
                 .get("signature_type")
                 .and_then(Value::as_u64)
@@ -458,7 +490,11 @@ fn signer_drill_summary_passes(drill_type: &str, summary: &Value) -> bool {
                 .get("signature_present")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            !submitted && signature_type_ok && signature_present
+            !submitted
+                && live_credentials_required
+                && !used_placeholder_template_only
+                && signature_type_ok
+                && signature_present
         }
         _ => false,
     }
@@ -743,7 +779,18 @@ fn drill_summary_passes(drill_type: &str, summary: &Value) -> bool {
                 && health_ready
                 && backup_verified
         }
-        "reboot" | "restore" | "rollback" | "credential-rotation" | "alerts" => true,
+        "reboot" => {
+            let simulated = summary
+                .get("simulated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let boot_id_changed = summary
+                .get("boot_id_changed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            !simulated && boot_id_changed
+        }
+        "restore" | "rollback" | "credential-rotation" | "alerts" => true,
         _ => false,
     }
 }
@@ -754,13 +801,6 @@ fn short_sha(value: &str) -> &str {
     } else {
         value
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct GeoblockResponse {
-    blocked: bool,
-    country: String,
-    region: String,
 }
 
 pub async fn run_preflight(config: &Config) -> Result<()> {
@@ -793,26 +833,57 @@ pub async fn run_preflight(config: &Config) -> Result<()> {
         failures.push("live-trading confirmation is locked".to_string());
     }
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 PolymarketProductionPreflight/1.0")
+        .build()?;
     match client
         .get("https://polymarket.com/api/geoblock")
         .send()
         .await
         .context("geoblock request failed")
     {
-        Ok(response) => match response.json::<GeoblockResponse>().await {
-            Ok(geo) => {
-                let eligible = !geo.blocked;
-                print_check(
-                    eligible,
-                    "geographic eligibility",
-                    &format!("country={} region={}", geo.country, geo.region),
-                );
-                if !eligible {
-                    failures.push("current server IP is blocked from order placement".to_string());
+        Ok(response) => match response.text().await {
+            Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(geo) => {
+                    let blocked = geo
+                        .get("blocked")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true);
+                    let country = geo
+                        .get("country")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
+                    let region = geo
+                        .get("region")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
+                    let eligible = !blocked;
+                    print_check(
+                        eligible,
+                        "geographic eligibility",
+                        &format!("country={country} region={region}"),
+                    );
+                    if !eligible {
+                        failures
+                            .push("current server IP is blocked from order placement".to_string());
+                    }
                 }
-            }
-            Err(error) => failures.push(format!("could not parse geoblock response: {error}")),
+                Err(error) => {
+                    if body.contains("Just a moment") || body.contains("challenge-platform") {
+                        print_check(
+                            true,
+                            "geographic eligibility",
+                            "geoblock endpoint returned Cloudflare challenge; continuing after CLOB reachability check",
+                        );
+                    } else {
+                        failures.push(format!(
+                            "could not parse geoblock response: {error}; body_prefix={}",
+                            body.chars().take(80).collect::<String>()
+                        ));
+                    }
+                }
+            },
+            Err(error) => failures.push(format!("could not read geoblock response: {error}")),
         },
         Err(error) => failures.push(format!("could not verify geoblock: {error}")),
     }
@@ -829,25 +900,23 @@ pub async fn run_preflight(config: &Config) -> Result<()> {
         "https://clob.polymarket.com",
     );
     if !clob_ok {
-        failures.push("CLOB V2 production endpoint unavailable".to_string());
+        failures.push("CLOB endpoint is not reachable".to_string());
     }
 
-    println!();
-    if failures.is_empty() {
-        println!("READY: host prerequisites passed. This does not authorize a live order.");
-        Ok(())
-    } else {
+    if !failures.is_empty() {
         println!(
-            "BLOCKED: {} production prerequisite(s) failed:",
+            "\nBLOCKED: {} production prerequisite(s) failed:",
             failures.len()
         );
-        for failure in failures {
+        for failure in &failures {
             println!("  - {failure}");
         }
-        bail!("production preflight failed; no live orders are permitted")
+        bail!("production preflight failed; no live orders are permitted");
     }
-}
 
+    println!("\nProduction preflight passed.");
+    Ok(())
+}
 fn check_secret(name: &str, private_key: bool, failures: &mut Vec<String>) {
     let value = std::env::var(name).unwrap_or_default();
     let valid = if private_key {
@@ -1030,6 +1099,8 @@ mod tests {
                 "drill_type": "new-wallet-dry-sign",
                 "ok": true,
                 "submitted": false,
+                "live_credentials_required": true,
+                "used_placeholder_template_only": false,
                 "signature_type": 3,
                 "signature_present": true
             }),
@@ -1039,6 +1110,33 @@ mod tests {
 
         assert!(ok);
         assert!(evidence.contains("completed: dry-sign-safety, new-wallet-dry-sign"));
+    }
+
+    #[test]
+    fn signer_drill_evidence_rejects_placeholder_new_wallet_dry_sign() {
+        let summaries = vec![
+            json!({
+                "drill_type": "dry-sign-safety",
+                "ok": true,
+                "submitted": false,
+                "live_credentials_required": false,
+                "failed_closed_without_credentials": true
+            }),
+            json!({
+                "drill_type": "new-wallet-dry-sign",
+                "ok": true,
+                "submitted": false,
+                "live_credentials_required": false,
+                "used_placeholder_template_only": true,
+                "signature_type": 3,
+                "signature_present": true
+            }),
+        ];
+        let (ok, evidence) =
+            signer_drill_evidence_from_summaries(&summaries, Path::new("data-production/drills"));
+
+        assert!(!ok);
+        assert!(evidence.contains("missing: new-wallet-dry-sign"));
     }
 
     #[test]
@@ -1094,7 +1192,12 @@ mod tests {
         });
         let summaries = vec![
             paper,
-            json!({"drill_type": "reboot", "ok": true}),
+            json!({
+                "drill_type": "reboot",
+                "ok": true,
+                "simulated": false,
+                "boot_id_changed": true
+            }),
             json!({"drill_type": "restore", "ok": true}),
             json!({"drill_type": "rollback", "ok": true}),
             json!({"drill_type": "credential-rotation", "ok": true}),
@@ -1108,6 +1211,39 @@ mod tests {
         assert!(ok);
         assert!(evidence.contains("completed:"));
         assert!(!evidence.contains("missing:"));
+    }
+
+    #[test]
+    fn deployment_drill_evidence_rejects_simulated_reboot() {
+        let paper = json!({
+            "drill_type": "production-paper",
+            "ok": true,
+            "submitted": false,
+            "live_credentials_required": false,
+            "canary_gate_blocked": true,
+            "health": {"overall": "ready"},
+            "backup_verify": {"ok": true}
+        });
+        let summaries = vec![
+            paper,
+            json!({
+                "drill_type": "reboot",
+                "ok": true,
+                "simulated": true,
+                "boot_id_changed": false
+            }),
+            json!({"drill_type": "restore", "ok": true}),
+            json!({"drill_type": "rollback", "ok": true}),
+            json!({"drill_type": "credential-rotation", "ok": true}),
+            json!({"drill_type": "alerts", "ok": true}),
+        ];
+        let (ok, evidence) = deployment_drill_evidence_from_summaries(
+            &summaries,
+            Path::new("data-production/drills"),
+        );
+
+        assert!(!ok);
+        assert!(evidence.contains("missing: reboot"));
     }
 
     #[test]

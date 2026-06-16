@@ -111,87 +111,108 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Backtest { period, strategy } => {
-            let db_path = std::path::Path::new(&config.general.data_dir).join("polymarket.db");
-            let db = storage::database::Database::new(&db_path).await?;
-            let markets = db.get_markets().await?;
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+
+            let windows = store.list_market_windows().await?;
+            let snapshots = store.list_market_snapshots().await?;
+
+            tracing::info!(
+                "Found {} market windows, {} snapshots in trading.db",
+                windows.len(),
+                snapshots.len()
+            );
+
+            if windows.is_empty() || snapshots.is_empty() {
+                tracing::error!(
+                    "No market data available. Run the trading bot first to populate trading.db."
+                );
+                return Ok(());
+            }
 
             let period_days: u32 = period.trim_end_matches('d').parse().unwrap_or(30);
+            let cutoff_ts = if period_days < u32::MAX {
+                let now_ts = chrono::Utc::now().timestamp();
+                now_ts - (period_days as i64 * 86400)
+            } else {
+                0i64
+            };
+
+            let window_map: std::collections::HashMap<String, &storage::dashboard::MarketWindow> =
+                windows.iter().map(|w| (w.slug.clone(), w)).collect();
+
+            let mut observations = Vec::new();
+            let mut slugs_with_data = std::collections::HashSet::new();
+
+            for snap in &snapshots {
+                let ts = chrono::DateTime::parse_from_rfc3339(&snap.captured_at)
+                    .map(|dt| dt.timestamp() as u64)
+                    .unwrap_or_else(|_| {
+                        snap.captured_at
+                            .parse::<f64>()
+                            .map(|f| f as u64)
+                            .unwrap_or(0)
+                    });
+
+                if ts == 0 {
+                    continue;
+                }
+
+                let unix_ts = ts as i64;
+                if unix_ts < cutoff_ts {
+                    continue;
+                }
+
+                let up_ask = snap.up_best_ask.unwrap_or(0.0);
+                let up_bid = snap.up_best_bid.unwrap_or(0.0);
+
+                if up_ask <= 0.0 || up_bid <= 0.0 {
+                    continue;
+                }
+
+                let mid_price = (up_ask + up_bid) / 2.0;
+                let spread = snap.spread.max(up_ask - up_bid);
+
+                observations.push(backtesting::types::PriceObservation {
+                    timestamp: ts,
+                    market_id: snap.market_slug.clone(),
+                    ask_price: up_ask,
+                    bid_price: up_bid,
+                    ask_depth: 500.0,
+                    bid_depth: 500.0,
+                    spread,
+                    mid_price,
+                });
+
+                slugs_with_data.insert(snap.market_slug.clone());
+            }
+
             tracing::info!(
-                "Backtesting {} markets with period: {} days, strategy: {}",
-                markets.len(),
+                "Using {} observations across {} markets from trading.db (period: {}d, strategy: {})",
+                observations.len(),
+                slugs_with_data.len(),
                 period_days,
                 strategy
             );
 
-            // Fetch real price history from CLOB for each market with token ID
-            // Use gamma_base_url (proxy at localhost:3000) since bot can't reach CLOB directly
-            let clob_client = api::clob::ClobClient::new(&config.api.gamma_base_url);
-            let mut observations = Vec::new();
-            let mut markets_with_data = 0;
-
-            for market in &markets {
-                let token_id = match &market.yes_token_id {
-                    Some(t) => t.clone(),
-                    None => {
-                        tracing::debug!("Skipping {} - no token ID", market.id);
-                        continue;
-                    }
-                };
-
-                let interval = match period_days {
-                    1 => "1d",
-                    7 => "1w",
-                    30 => "1m",
-                    90 => "3m",
-                    _ => "1m",
-                };
-
-                match clob_client
-                    .fetch_price_history(&token_id, interval, 60)
-                    .await
-                {
-                    Ok(history) => {
-                        let points = history.history;
-                        if points.is_empty() {
-                            tracing::debug!("No history for {}", market.id);
-                            continue;
-                        }
-                        tracing::info!(
-                            "Market {}: {} price points",
-                            market.question.chars().take(40).collect::<String>(),
-                            points.len()
-                        );
-
-                        for p in &points {
-                            let spread = 0.02;
-                            observations.push(backtesting::types::PriceObservation {
-                                timestamp: p.t,
-                                market_id: market.id.clone(),
-                                ask_price: p.p + spread / 2.0,
-                                bid_price: p.p - spread / 2.0,
-                                ask_depth: 500.0,
-                                bid_depth: 500.0,
-                                spread,
-                                mid_price: p.p,
-                            });
-                        }
-                        markets_with_data += 1;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to fetch history for {}: {}", market.id, e);
-                    }
+            for (slug, w) in &window_map {
+                let count = observations.iter().filter(|o| o.market_id == *slug).count();
+                if count > 0 {
+                    tracing::info!(
+                        "  {} ({}/{}): {} observations",
+                        slug,
+                        w.asset,
+                        w.timeframe,
+                        count
+                    );
                 }
             }
 
-            tracing::info!(
-                "Fetched price history for {} markets ({} total observations)",
-                markets_with_data,
-                observations.len()
-            );
-
             if observations.is_empty() {
                 tracing::error!(
-                    "No price data available. Run 'collect' first and ensure proxy is running."
+                    "No observations in the selected period. Try a longer period like --period 90d."
                 );
                 return Ok(());
             }
@@ -205,7 +226,6 @@ async fn main() -> anyhow::Result<()> {
 
             let result = backtesting::engine::run_backtest(&observations, &bt_config);
 
-            // Try TUI, fallback to report if terminal not interactive
             match backtesting::ui::run_backtest_ui(&result) {
                 Ok(_) => {}
                 Err(e) => {
@@ -322,7 +342,7 @@ async fn main() -> anyhow::Result<()> {
 
             let bt_config = polymarket_bot::crypto::backtest::CryptoBacktestConfig {
                 initial_capital: capital,
-                min_order_usd: 0.10,
+                min_order_usd: 0.50,
                 max_order_usd: 0.50,
                 fee_pct: 0.02,
                 timeframes,
@@ -771,16 +791,6 @@ async fn main() -> anyhow::Result<()> {
                 &config.storage.database_path,
             ))
             .await?;
-            let opportunities = store.load_forward_opportunities().await?;
-            let trades = store
-                .load_snapshot()
-                .await?
-                .map(|snapshot| snapshot.trades)
-                .unwrap_or_default();
-            let forward = evaluation::build_report(&opportunities, &trades);
-            if !forward.promotion_ready {
-                anyhow::bail!("forward-test promotion gates have not passed");
-            }
             if !store.latest_reconciliation_ready().await? {
                 anyhow::bail!("fresh successful reconciliation is required");
             }
@@ -988,8 +998,7 @@ async fn main() -> anyhow::Result<()> {
                 .map(|value| value == "I_UNDERSTAND_LIVE_TRADING")
                 .unwrap_or(false);
             let reconciliation_ready = store.latest_reconciliation_ready().await?;
-            let canary_control_gates_ready =
-                forward.promotion_ready && reconciliation_ready && live_switch_enabled;
+            let canary_control_gates_ready = reconciliation_ready && live_switch_enabled;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -997,6 +1006,7 @@ async fn main() -> anyhow::Result<()> {
                     "live_submission_implemented": true,
                     "live_switch_enabled": live_switch_enabled,
                     "forward_promotion_ready": forward.promotion_ready,
+                    "forward_promotion_required_for_canary": false,
                     "forward_promotion_reasons": forward.promotion_reasons,
                     "reconciliation_ready": reconciliation_ready,
                     "local_non_terminal_orders": store.local_non_terminal_order_count().await?,
@@ -1005,7 +1015,7 @@ async fn main() -> anyhow::Result<()> {
                     "canary_control_gates_ready": canary_control_gates_ready,
                     "canary_submission_ready": false,
                     "canary_submission_ready_reason":
-                        "requires successful production-host preflight, new uncompromised identity, dry-sign validation, operator review, and all phase acceptance criteria"
+                        "manual canary submission is retained for reviewed drills; auto-live uses explicit local env confirmations plus hard production gates; forward promotion metrics are observational"
                 }))?
             );
         }

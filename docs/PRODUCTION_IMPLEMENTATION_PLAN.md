@@ -1,5 +1,10 @@
 # Polymarket Production Implementation Plan
 
+> Current operator note: this historical plan is retained for context. For the
+> active production handoff, use `docs/PRODUCTION_OPERATOR_SETUP.md` and
+> `docs/PRODUCTION_RUNBOOK.md`. Forward-test Phase 4 is now observational
+> evidence, not a blocker for the explicit auto-live operator path.
+
 ## 1. Objective
 
 Prepare the application so it can progress safely from paper trading to a

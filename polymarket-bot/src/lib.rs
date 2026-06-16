@@ -13,5 +13,6 @@ pub mod evaluation;
 pub mod execution;
 pub mod models;
 pub mod paper_trading;
+pub mod production;
 pub mod storage;
 pub mod web;

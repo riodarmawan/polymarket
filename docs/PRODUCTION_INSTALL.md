@@ -1,8 +1,8 @@
 # Production-Paper Installation
 
 This is the canonical installation path for a new operator or LLM. It deploys
-the release binaries with the production configuration while keeping all order
-execution paper-only.
+the release binaries with the production configuration in the safe default
+paper mode.
 
 ## 1. Host Requirements
 
@@ -63,7 +63,8 @@ Runtime characteristics:
 - mode: `paper`
 - dashboard database: `polymarket-bot/data-production/trading.db`
 - public market-data proxy: `http://localhost:3000`
-- live order submission: blocked
+- live order submission: blocked unless the separate operator-live environment
+  flags and all hard production gates pass
 
 No wallet or API credentials are required for production-paper.
 
@@ -111,11 +112,12 @@ systemctl status polymarket-gamma polymarket-dashboard
 curl --fail http://localhost:3001/api/health
 ```
 
-## 6. Live Trading Is Not Installation Work
+## 6. Operator-Live Is Separate From Installation
 
 Do not add wallet credentials merely to run production-paper. Live execution
-remains blocked until all phases in `docs/PRODUCTION_IMPLEMENTATION_PLAN.md`
-are complete and `production-check` passes with a completely new wallet.
+must be treated as an explicit operator step, not a default install step. It
+requires a completely new wallet, local locked secrets, the live environment
+confirmations, and passing production gates.
 
 To prepare a locked, unpopulated secret file for future onboarding:
 
@@ -126,3 +128,6 @@ To prepare a locked, unpopulated secret file for future onboarding:
 
 Then follow `docs/WALLET_ONBOARDING.md`. The scripts do not generate private
 keys and keep live trading disabled.
+
+For the current operator dashboard handoff, use
+`docs/PRODUCTION_OPERATOR_SETUP.md`.

@@ -14,6 +14,33 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
+#[derive(Debug, Clone)]
+pub struct MarketWindow {
+    pub slug: String,
+    pub asset: String,
+    pub timeframe: String,
+    pub start_ts: i64,
+    pub end_ts: i64,
+    pub up_token_id: Option<String>,
+    pub down_token_id: Option<String>,
+    pub latest_status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketSnapshot {
+    pub id: i64,
+    pub market_slug: String,
+    pub up_best_ask: Option<f64>,
+    pub up_best_bid: Option<f64>,
+    pub down_best_ask: Option<f64>,
+    pub down_best_bid: Option<f64>,
+    pub spread: f64,
+    pub price_to_beat: f64,
+    pub current_price: f64,
+    pub status: String,
+    pub captured_at: String,
+}
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
@@ -599,6 +626,32 @@ impl DashboardStore {
         strategy_version: &str,
         decision: &RiskDecision,
     ) -> Result<()> {
+        self.record_risk_decision_with_context(
+            market_slug,
+            timeframe,
+            runtime_mode,
+            strategy_version,
+            decision,
+            serde_json::Value::Null,
+        )
+        .await
+    }
+
+    pub async fn record_risk_decision_with_context(
+        &self,
+        market_slug: &str,
+        timeframe: &str,
+        runtime_mode: &str,
+        strategy_version: &str,
+        decision: &RiskDecision,
+        context: serde_json::Value,
+    ) -> Result<()> {
+        let mut detail = serde_json::to_value(decision)?;
+        if !context.is_null() {
+            if let Some(detail) = detail.as_object_mut() {
+                detail.insert("context".to_string(), context);
+            }
+        }
         sqlx::query(
             r#"
             INSERT INTO risk_decisions (
@@ -613,7 +666,7 @@ impl DashboardStore {
         .bind(strategy_version)
         .bind(decision.approved)
         .bind(&decision.reason_code)
-        .bind(serde_json::to_string(decision)?)
+        .bind(serde_json::to_string(&detail)?)
         .bind(Utc::now().to_rfc3339())
         .execute(&self.pool)
         .await?;
@@ -629,14 +682,19 @@ impl DashboardStore {
                 , end_ts
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(market_slug) DO UPDATE SET
+                timeframe = excluded.timeframe,
+                direction = excluded.direction,
+                confidence = excluded.confidence,
                 expected_fill_price = excluded.expected_fill_price,
                 spread = excluded.spread,
                 fee_rate_bps = excluded.fee_rate_bps,
                 approved = MAX(forward_opportunities.approved, excluded.approved),
                 reason_code = CASE
-                    WHEN excluded.approved = 1 THEN excluded.reason_code
-                    ELSE forward_opportunities.reason_code
-                END
+                    WHEN forward_opportunities.approved = 1 OR excluded.approved = 1
+                        THEN 'approved'
+                    ELSE excluded.reason_code
+                END,
+                captured_at_ms = excluded.captured_at_ms
             "#,
         )
         .bind(&opportunity.market_slug)
@@ -704,6 +762,167 @@ impl DashboardStore {
             .collect())
     }
 
+    pub async fn load_execution_audit(&self, limit: i64) -> Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query(
+            r#"
+            WITH latest_meta AS (
+                SELECT metadata.*
+                FROM market_execution_metadata metadata
+                JOIN (
+                    SELECT market_slug, MAX(id) AS id
+                    FROM market_execution_metadata
+                    GROUP BY market_slug
+                ) latest ON latest.id = metadata.id
+            ),
+            latest_quality AS (
+                SELECT quality.*
+                FROM market_data_quality quality
+                JOIN (
+                    SELECT market_slug, MAX(id) AS id
+                    FROM market_data_quality
+                    GROUP BY market_slug
+                ) latest ON latest.id = quality.id
+            ),
+            latest_snapshot AS (
+                SELECT snapshot.*
+                FROM market_snapshots snapshot
+                JOIN (
+                    SELECT market_slug, MAX(id) AS id
+                    FROM market_snapshots
+                    GROUP BY market_slug
+                ) latest ON latest.id = snapshot.id
+            )
+            SELECT
+                decision.id,
+                decision.market_slug,
+                decision.timeframe,
+                decision.runtime_mode,
+                decision.strategy_version,
+                decision.approved,
+                decision.reason_code,
+                decision.detail_json,
+                decision.created_at,
+                opportunity.direction,
+                opportunity.confidence,
+                opportunity.expected_fill_price,
+                opportunity.spread,
+                opportunity.fee_rate_bps,
+                opportunity.captured_at_ms,
+                opportunity.end_ts,
+                opportunity.official_outcome,
+                opportunity.settled_at_ms,
+                metadata.tick_size,
+                metadata.min_order_size,
+                metadata.fee_rate_bps AS meta_fee_rate_bps,
+                metadata.negative_risk,
+                metadata.up_executable_depth_usd,
+                metadata.down_executable_depth_usd,
+                metadata.up_expected_fill_price,
+                metadata.down_expected_fill_price,
+                metadata.clock_drift_ms,
+                quality.data_status,
+                quality.detail AS data_detail,
+                quality.token_mapping_valid,
+                snapshot.up_best_ask,
+                snapshot.up_best_bid,
+                snapshot.down_best_ask,
+                snapshot.down_best_bid,
+                snapshot.price_to_beat,
+                snapshot.current_price,
+                snapshot.status AS market_status
+            FROM risk_decisions decision
+            LEFT JOIN forward_opportunities opportunity
+                ON opportunity.market_slug = decision.market_slug
+            LEFT JOIN latest_meta metadata
+                ON metadata.market_slug = decision.market_slug
+            LEFT JOIN latest_quality quality
+                ON quality.market_slug = decision.market_slug
+            LEFT JOIN latest_snapshot snapshot
+                ON snapshot.market_slug = decision.market_slug
+            ORDER BY decision.id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit.clamp(1, 500))
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let detail_json: String = row.get("detail_json");
+                let detail = serde_json::from_str::<serde_json::Value>(&detail_json)
+                    .unwrap_or(serde_json::Value::Null);
+                let checks = detail
+                    .get("checks")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]));
+                let failed_checks: Vec<serde_json::Value> = checks
+                    .as_array()
+                    .map(|checks| {
+                        checks
+                            .iter()
+                            .filter(|check| {
+                                check
+                                    .get("passed")
+                                    .and_then(serde_json::Value::as_bool)
+                                    == Some(false)
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                serde_json::json!({
+                    "id": row.get::<i64, _>("id"),
+                    "market_slug": row.get::<String, _>("market_slug"),
+                    "timeframe": row.get::<String, _>("timeframe"),
+                    "runtime_mode": row.get::<String, _>("runtime_mode"),
+                    "strategy_version": row.get::<String, _>("strategy_version"),
+                    "approved": row.get::<i64, _>("approved") != 0,
+                    "reason_code": row.get::<String, _>("reason_code"),
+                    "created_at": row.get::<String, _>("created_at"),
+                    "direction": row.get::<Option<String>, _>("direction"),
+                    "confidence": row.get::<Option<f64>, _>("confidence"),
+                    "expected_fill_price": row.get::<Option<f64>, _>("expected_fill_price"),
+                    "spread": row.get::<Option<f64>, _>("spread"),
+                    "fee_rate_bps": row.get::<Option<i64>, _>("fee_rate_bps"),
+                    "captured_at_ms": row.get::<Option<i64>, _>("captured_at_ms"),
+                    "end_ts": row.get::<Option<i64>, _>("end_ts"),
+                    "official_outcome": row.get::<Option<String>, _>("official_outcome"),
+                    "settled_at_ms": row.get::<Option<i64>, _>("settled_at_ms"),
+                    "context": detail.get("context").cloned().unwrap_or(serde_json::Value::Null),
+                    "intent": detail.get("intent").cloned().unwrap_or(serde_json::Value::Null),
+                    "checks": checks,
+                    "failed_checks": failed_checks,
+                    "market_data": {
+                        "status": row.get::<Option<String>, _>("data_status"),
+                        "detail": row.get::<Option<String>, _>("data_detail"),
+                        "token_mapping_valid": row.get::<Option<i64>, _>("token_mapping_valid").map(|value| value != 0),
+                        "market_status": row.get::<Option<String>, _>("market_status"),
+                        "price_to_beat": row.get::<Option<f64>, _>("price_to_beat"),
+                        "current_price": row.get::<Option<f64>, _>("current_price"),
+                        "up_best_ask": row.get::<Option<f64>, _>("up_best_ask"),
+                        "up_best_bid": row.get::<Option<f64>, _>("up_best_bid"),
+                        "down_best_ask": row.get::<Option<f64>, _>("down_best_ask"),
+                        "down_best_bid": row.get::<Option<f64>, _>("down_best_bid")
+                    },
+                    "execution_metadata": {
+                        "tick_size": row.get::<Option<f64>, _>("tick_size"),
+                        "min_order_size": row.get::<Option<f64>, _>("min_order_size"),
+                        "fee_rate_bps": row.get::<Option<i64>, _>("meta_fee_rate_bps"),
+                        "negative_risk": row.get::<Option<i64>, _>("negative_risk").map(|value| value != 0),
+                        "up_executable_depth_usd": row.get::<Option<f64>, _>("up_executable_depth_usd"),
+                        "down_executable_depth_usd": row.get::<Option<f64>, _>("down_executable_depth_usd"),
+                        "up_expected_fill_price": row.get::<Option<f64>, _>("up_expected_fill_price"),
+                        "down_expected_fill_price": row.get::<Option<f64>, _>("down_expected_fill_price"),
+                        "clock_drift_ms": row.get::<Option<i64>, _>("clock_drift_ms")
+                    }
+                })
+            })
+            .collect())
+    }
+
     pub async fn load_unsettled_opportunity_slugs(&self, now_ts: i64) -> Result<Vec<String>> {
         Ok(sqlx::query_scalar(
             "SELECT market_slug FROM forward_opportunities WHERE official_outcome IS NULL AND end_ts <= ? ORDER BY end_ts LIMIT 100",
@@ -711,6 +930,51 @@ impl DashboardStore {
         .bind(now_ts)
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    pub async fn list_market_windows(&self) -> Result<Vec<MarketWindow>> {
+        let rows = sqlx::query(
+            "SELECT slug, asset, timeframe, start_ts, end_ts, up_token_id, down_token_id, latest_status FROM market_windows ORDER BY start_ts",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| MarketWindow {
+                slug: row.get("slug"),
+                asset: row.get("asset"),
+                timeframe: row.get("timeframe"),
+                start_ts: row.get("start_ts"),
+                end_ts: row.get("end_ts"),
+                up_token_id: row.get("up_token_id"),
+                down_token_id: row.get("down_token_id"),
+                latest_status: row.get("latest_status"),
+            })
+            .collect())
+    }
+
+    pub async fn list_market_snapshots(&self) -> Result<Vec<MarketSnapshot>> {
+        let rows = sqlx::query(
+            "SELECT id, market_slug, up_best_ask, up_best_bid, down_best_ask, down_best_bid, spread, price_to_beat, current_price, status, captured_at FROM market_snapshots ORDER BY captured_at",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| MarketSnapshot {
+                id: row.get("id"),
+                market_slug: row.get("market_slug"),
+                up_best_ask: row.get("up_best_ask"),
+                up_best_bid: row.get("up_best_bid"),
+                down_best_ask: row.get("down_best_ask"),
+                down_best_bid: row.get("down_best_bid"),
+                spread: row.get("spread"),
+                price_to_beat: row.get("price_to_beat"),
+                current_price: row.get("current_price"),
+                status: row.get("status"),
+                captured_at: row.get("captured_at"),
+            })
+            .collect())
     }
 
     pub async fn record_market_scan(&self, markets: &[UpDownMarket]) -> Result<()> {

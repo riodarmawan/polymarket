@@ -307,6 +307,77 @@ pub async fn execute_authorized_canary<E: OrderExecutor>(
     }
 }
 
+pub async fn execute_armed_signal<E: OrderExecutor>(
+    store: &DashboardStore,
+    executor: &E,
+    intent: &ExecutionIntent,
+) -> Result<SubmissionOutcome> {
+    let request = LiveOrderRequest::from_intent(intent)?;
+    let record = OrderRecord {
+        client_key: request.client_key.clone(),
+        market_slug: request.market_slug.clone(),
+        token_id: request.token_id.clone(),
+        side: "BUY".to_string(),
+        requested_price: request.price.clone(),
+        requested_size: request.size.clone(),
+        state: OrderState::IntentPersisted,
+        clob_order_id: None,
+        filled_size: "0".to_string(),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    if !store
+        .create_order_and_reserve(&record, request.order_usd, serde_json::to_value(&request)?)
+        .await?
+    {
+        bail!("order already exists for this deterministic client key");
+    }
+    store
+        .transition_order(
+            &request.client_key,
+            OrderState::Signed,
+            None,
+            "0",
+            serde_json::json!({"submitted": false, "authorization": "armed_signal"}),
+        )
+        .await?;
+
+    match executor.submit_fok(&request).await {
+        Ok(outcome) => {
+            store
+                .transition_order(
+                    &request.client_key,
+                    outcome.state,
+                    Some(&outcome.order_id),
+                    &outcome.filled_size,
+                    serde_json::to_value(&outcome)?,
+                )
+                .await?;
+            let reservation_status = match outcome.state {
+                OrderState::Filled => "filled",
+                OrderState::Cancelled | OrderState::Rejected => "released",
+                _ => "held",
+            };
+            store
+                .update_capital_reservation(&request.client_key, reservation_status)
+                .await?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            store
+                .transition_order(
+                    &request.client_key,
+                    OrderState::UnknownRemote,
+                    None,
+                    "0",
+                    serde_json::json!({"reason": "ambiguous_armed_signal_submit_failure"}),
+                )
+                .await?;
+            Err(error
+                .context("armed signal submission outcome is ambiguous; reconciliation required"))
+        }
+    }
+}
+
 struct AuthMaterial {
     secrets: TradingSecrets,
     host: String,

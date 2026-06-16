@@ -8,7 +8,7 @@ trading_enabled = true
 enable_5m = true
 enable_15m = true
 max_open_positions = 1
-max_order_usd = 0.10
+max_order_usd = 0.50
 max_daily_orders = 3
 max_daily_realized_loss_usd = 0.30
 max_drawdown = 0.20
@@ -58,8 +58,11 @@ min_edge_pct = 0.10
 [position_sizing]
 kelly_fraction = 0.0
 max_position_pct = 0.05
-min_position_usd = 0.10
-max_position_usd = 0.10
+min_position_usd = 0.50
+max_position_usd = 0.50
+
+[trading]
+max_hours_to_resolution = 720
 
 [paper_trading]
 enabled = true
@@ -68,7 +71,7 @@ dry_run = true
 [crypto]
 enabled = true
 initial_capital = 2.0
-min_order_usd = 0.10
+min_order_usd = 0.50
 max_trades_per_hour = 3
 min_confidence = 0.70
 timeframes = ["5m", "15m"]

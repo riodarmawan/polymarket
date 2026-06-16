@@ -764,13 +764,13 @@ impl Config {
                 bail!("production dashboard must bind to 127.0.0.1:3001");
             }
             if self.risk.max_open_positions > 1
-                || self.risk.max_order_usd > 0.10
+                || self.risk.max_order_usd > 0.50
                 || self.risk.max_daily_orders > 3
                 || self.risk.max_daily_realized_loss_usd > 0.30
                 || self.risk.max_drawdown > 0.20
                 || self.risk.max_consecutive_losses > 3
             {
-                bail!("production risk limits exceed the approved $2 canary limits");
+                bail!("production risk limits exceed the approved $2 operator limits");
             }
             if !self.execution.reconcile_before_ready || !self.execution.cancel_on_shutdown {
                 bail!("production requires reconciliation and cancel-on-shutdown");
@@ -852,10 +852,10 @@ mod tests {
         config.runtime.environment = RuntimeEnvironment::Production;
         assert!(config.validate(false).is_err());
 
-        config.risk.max_order_usd = 0.50;
+        config.risk.max_order_usd = 0.51;
         assert!(config.validate(true).is_err());
 
-        config.risk.max_order_usd = 0.10;
+        config.risk.max_order_usd = 0.50;
         assert!(config.validate(true).is_ok());
     }
 
