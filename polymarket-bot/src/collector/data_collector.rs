@@ -2,7 +2,7 @@ use crate::api::gamma::GammaClient;
 use crate::error::BotError;
 use crate::storage::database::Database;
 use crate::storage::types::StoredMarket;
-use chrono::{Utc, DateTime, NaiveDateTime};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use std::str::FromStr;
 
 #[derive(Debug, Clone)]
@@ -13,7 +13,7 @@ pub struct DataCollector {
 
 impl DataCollector {
     pub fn new(gamma_base_url: String, max_hours_to_resolution: f64) -> Self {
-        Self { 
+        Self {
             gamma_base_url,
             max_hours_to_resolution,
         }
@@ -37,7 +37,7 @@ impl DataCollector {
             if let Ok(end_date) = DateTime::parse_from_rfc3339(&market.end_date) {
                 let end_utc = end_date.with_timezone(&Utc);
                 let time_to_resolution = end_utc - now;
-                
+
                 // Include markets that:
                 // 1. Resolve within max_hours_to_resolution (upcoming)
                 // 2. Are past deadline but still active (need resolution)

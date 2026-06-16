@@ -1,0 +1,15 @@
+[Unit]
+Description=Create consistent Polymarket SQLite backup
+
+[Service]
+Type=oneshot
+User=polymarket
+Group=polymarket
+WorkingDirectory=/opt/polymarket/polymarket-bot
+EnvironmentFile=/etc/polymarket/production.env
+ExecStart=/opt/polymarket/polymarket-bot/target/release/polymarket-bot backup
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/polymarket/polymarket-bot/data-production

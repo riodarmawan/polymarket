@@ -1,10 +1,5 @@
 /// Calculate the average execution price considering slippage
-pub fn calculate_slippage(
-    base_price: f64,
-    depth: f64,
-    order_size_usd: f64,
-    tick_size: f64,
-) -> f64 {
+pub fn calculate_slippage(base_price: f64, depth: f64, order_size_usd: f64, tick_size: f64) -> f64 {
     if depth <= 0.0 || order_size_usd <= 0.0 {
         return base_price;
     }

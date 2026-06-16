@@ -1,4 +1,9 @@
 use crate::backtesting::types::BacktestResult;
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEventKind},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -6,11 +11,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame, Terminal,
-};
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::io;
 
@@ -50,7 +50,11 @@ fn ui(f: &mut Frame, result: &BacktestResult) {
 
     // Header
     let header = Paragraph::new("POLYMARKET BACKTEST RESULTS  [q] quit")
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(header, chunks[0]);
 
@@ -79,7 +83,10 @@ fn render_summary(f: &mut Frame, result: &BacktestResult, area: Rect) {
         Line::from(vec![
             Span::styled("Capital: ", Style::default().fg(Color::White)),
             Span::styled(
-                format!("${:.2} -> ${:.2}", result.initial_capital, result.final_capital),
+                format!(
+                    "${:.2} -> ${:.2}",
+                    result.initial_capital, result.final_capital
+                ),
                 if ret >= 0.0 {
                     Style::default().fg(Color::Green)
                 } else {
@@ -99,7 +106,10 @@ fn render_summary(f: &mut Frame, result: &BacktestResult, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("Trades: ", Style::default().fg(Color::White)),
-            Span::styled(result.total_trades.to_string(), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                result.total_trades.to_string(),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::raw("  "),
             Span::styled("Win: ", Style::default().fg(Color::White)),
             Span::styled(
@@ -108,7 +118,10 @@ fn render_summary(f: &mut Frame, result: &BacktestResult, area: Rect) {
             ),
             Span::raw("  "),
             Span::styled("Loss: ", Style::default().fg(Color::White)),
-            Span::styled(result.losing_trades.to_string(), Style::default().fg(Color::Red)),
+            Span::styled(
+                result.losing_trades.to_string(),
+                Style::default().fg(Color::Red),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Fees: ", Style::default().fg(Color::White)),
@@ -132,8 +145,8 @@ fn render_summary(f: &mut Frame, result: &BacktestResult, area: Rect) {
         ]),
     ];
 
-    let summary = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("Summary"));
+    let summary =
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Summary"));
     f.render_widget(summary, area);
 }
 
@@ -148,7 +161,11 @@ fn render_equity_curve(f: &mut Frame, result: &BacktestResult, area: Rect) {
     let values: Vec<f64> = result.equity_curve.iter().map(|p| p.total_equity).collect();
     let min_val = values.iter().cloned().fold(f64::INFINITY, f64::min);
     let max_val = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let range = if max_val - min_val > 0.0 { max_val - min_val } else { 1.0 };
+    let range = if max_val - min_val > 0.0 {
+        max_val - min_val
+    } else {
+        1.0
+    };
 
     let chart_height = height - 2;
     let chart_width = width - 2;
@@ -174,8 +191,8 @@ fn render_equity_curve(f: &mut Frame, result: &BacktestResult, area: Rect) {
         lines.push(Line::from(spans));
     }
 
-    let chart = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("Equity Curve"));
+    let chart =
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Equity Curve"));
     f.render_widget(chart, area);
 }
 
@@ -198,12 +215,12 @@ fn render_trade_log(f: &mut Frame, result: &BacktestResult, area: Rect) {
                 String::new()
             };
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{:>3} ", t.step), Style::default().fg(Color::DarkGray)),
-                Span::styled(symbol, Style::default().fg(color)),
                 Span::styled(
-                    format!(" @ {:.3}", t.price),
-                    Style::default().fg(color),
+                    format!("{:>3} ", t.step),
+                    Style::default().fg(Color::DarkGray),
                 ),
+                Span::styled(symbol, Style::default().fg(color)),
+                Span::styled(format!(" @ {:.3}", t.price), Style::default().fg(color)),
                 Span::styled(pnl_str, Style::default().fg(color)),
             ]))
         })

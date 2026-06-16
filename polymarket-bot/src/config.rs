@@ -1,3 +1,4 @@
+use crate::build_info;
 use anyhow::{bail, Result};
 use serde::Deserialize;
 use std::fmt;
@@ -87,6 +88,12 @@ pub struct RuntimeConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RiskConfig {
+    #[serde(default = "default_true")]
+    pub trading_enabled: bool,
+    #[serde(default = "default_true")]
+    pub enable_5m: bool,
+    #[serde(default = "default_true")]
+    pub enable_15m: bool,
     #[serde(default = "default_production_max_positions")]
     pub max_open_positions: usize,
     #[serde(default = "default_production_max_order_usd")]
@@ -103,6 +110,10 @@ pub struct RiskConfig {
     pub max_spread: f64,
     #[serde(default = "default_max_data_age_ms")]
     pub max_data_age_ms: u64,
+    #[serde(default)]
+    pub min_balance_reserve_usd: f64,
+    #[serde(default = "default_max_fee_rate_bps")]
+    pub max_fee_rate_bps: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -280,6 +291,9 @@ fn default_max_consecutive_losses() -> usize {
 fn default_max_data_age_ms() -> u64 {
     15_000
 }
+fn default_max_fee_rate_bps() -> u64 {
+    500
+}
 fn default_order_type() -> String {
     "FOK".to_string()
 }
@@ -436,6 +450,9 @@ impl Default for RuntimeConfig {
 impl Default for RiskConfig {
     fn default() -> Self {
         Self {
+            trading_enabled: true,
+            enable_5m: true,
+            enable_15m: true,
             max_open_positions: default_production_max_positions(),
             max_order_usd: default_production_max_order_usd(),
             max_daily_orders: default_max_daily_orders(),
@@ -444,6 +461,8 @@ impl Default for RiskConfig {
             max_consecutive_losses: default_max_consecutive_losses(),
             max_spread: default_max_spread_pct(),
             max_data_age_ms: default_max_data_age_ms(),
+            min_balance_reserve_usd: 0.0,
+            max_fee_rate_bps: default_max_fee_rate_bps(),
         }
     }
 }
@@ -673,6 +692,15 @@ impl Config {
     }
 
     pub fn validate(&self, explicit_config: bool) -> Result<()> {
+        if matches!(self.runtime.mode, RuntimeMode::Canary | RuntimeMode::Live) {
+            if let Some(reason) = build_info::live_provenance_rejection(
+                &build_info::BuildInfo::current(),
+                self.runtime.environment,
+                build_info::dirty_dev_override_enabled(),
+            ) {
+                bail!("canary/live runtime is blocked: {reason}");
+            }
+        }
         if self.runtime.mode != RuntimeMode::Paper {
             bail!(
                 "runtime mode '{}' is blocked: this build only implements paper execution",
@@ -697,8 +725,15 @@ impl Config {
             || self.risk.max_consecutive_losses == 0
             || self.risk.max_spread <= 0.0
             || self.risk.max_data_age_ms == 0
+            || self.risk.max_fee_rate_bps == 0
         {
             bail!("risk limits must all be greater than zero");
+        }
+        if !self.risk.min_balance_reserve_usd.is_finite()
+            || self.risk.min_balance_reserve_usd < 0.0
+            || self.risk.min_balance_reserve_usd >= self.general.initial_capital
+        {
+            bail!("risk.min_balance_reserve_usd must be non-negative and below initial capital");
         }
         if self.risk.max_order_usd > self.general.initial_capital {
             bail!("risk.max_order_usd cannot exceed general.initial_capital");
@@ -759,12 +794,16 @@ impl Config {
     }
 
     pub fn print_startup_summary(&self) {
+        let build = build_info::BuildInfo::current();
         tracing::info!(
             runtime_mode = %self.runtime.mode,
             environment = ?self.runtime.environment,
             config = %self.source_label(),
             database = %self.storage.database_path,
-            build_version = env!("CARGO_PKG_VERSION"),
+            build_version = build.package_version,
+            git_sha = build.git_short_sha(),
+            git_dirty = build.git_dirty,
+            build_timestamp = build.build_timestamp,
             strategy_version = %self.runtime.strategy_version,
             "Startup configuration"
         );
@@ -774,7 +813,10 @@ impl Config {
 fn executable_default_config() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("config/default.toml")))
+        .and_then(|path| {
+            path.parent()
+                .map(|parent| parent.join("config/default.toml"))
+        })
         .unwrap_or_else(|| Path::new("config/default.toml").to_path_buf())
 }
 

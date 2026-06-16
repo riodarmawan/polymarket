@@ -9,9 +9,7 @@ struct Signal {
     reason: String,
 }
 
-fn evaluate_market(
-    market_observations: &[&PriceObservation],
-) -> Option<Signal> {
+fn evaluate_market(market_observations: &[&PriceObservation]) -> Option<Signal> {
     if market_observations.len() < 20 {
         return None;
     }
@@ -31,7 +29,11 @@ fn evaluate_market(
     let short_window = 20.min(n);
     let short_prices = &prices[n - short_window..];
     let short_mean = short_prices.iter().sum::<f64>() / short_window as f64;
-    let short_var = short_prices.iter().map(|p| (p - short_mean).powi(2)).sum::<f64>() / short_window as f64;
+    let short_var = short_prices
+        .iter()
+        .map(|p| (p - short_mean).powi(2))
+        .sum::<f64>()
+        / short_window as f64;
     let short_std = short_var.sqrt();
 
     // Only consider if there's actual volatility
@@ -146,10 +148,7 @@ fn evaluate_market(
     }
 }
 
-pub fn run_backtest(
-    observations: &[PriceObservation],
-    config: &BacktestConfig,
-) -> BacktestResult {
+pub fn run_backtest(observations: &[PriceObservation], config: &BacktestConfig) -> BacktestResult {
     let mut cash = config.initial_capital;
     let mut positions: Vec<Position> = Vec::new();
     let mut trades: Vec<TradeRecord> = Vec::new();
@@ -186,10 +185,8 @@ pub fn run_backtest(
     }
 
     for (step, &ts) in timestamps.iter().enumerate() {
-        let current_obs: Vec<&PriceObservation> = observations
-            .iter()
-            .filter(|o| o.timestamp == ts)
-            .collect();
+        let current_obs: Vec<&PriceObservation> =
+            observations.iter().filter(|o| o.timestamp == ts).collect();
 
         // 1. Update mark-to-market
         for pos in &mut positions {
@@ -292,7 +289,10 @@ pub fn run_backtest(
                 Some(s) => {
                     debug_signal_count += 1;
                     if debug_signal_count <= 5 {
-                        eprintln!("  SIGNAL: market={}, side={}, confidence={:.3}, reason={}", obs.market_id, s.side, s.confidence, s.reason);
+                        eprintln!(
+                            "  SIGNAL: market={}, side={}, confidence={:.3}, reason={}",
+                            obs.market_id, s.side, s.confidence, s.reason
+                        );
                     }
                     s
                 }
@@ -366,7 +366,10 @@ pub fn run_backtest(
         }
 
         // 4. Calculate equity
-        let positions_value: f64 = positions.iter().map(|p| p.size_usd + p.unrealized_pnl).sum();
+        let positions_value: f64 = positions
+            .iter()
+            .map(|p| p.size_usd + p.unrealized_pnl)
+            .sum();
         let total_equity = cash + positions_value;
 
         equity_curve.push(EquityPoint {
@@ -416,8 +419,14 @@ pub fn run_backtest(
         });
     }
 
-    let winning_trades = trades.iter().filter(|t| t.action == "SELL" && t.pnl > 0.0).count();
-    let losing_trades = trades.iter().filter(|t| t.action == "SELL" && t.pnl <= 0.0).count();
+    let winning_trades = trades
+        .iter()
+        .filter(|t| t.action == "SELL" && t.pnl > 0.0)
+        .count();
+    let losing_trades = trades
+        .iter()
+        .filter(|t| t.action == "SELL" && t.pnl <= 0.0)
+        .count();
 
     // Sharpe ratio (annualized)
     let returns: Vec<f64> = equity_curve
@@ -438,7 +447,11 @@ pub fn run_backtest(
     };
 
     let variance = if returns.len() > 1 {
-        returns.iter().map(|r| (r - avg_return).powi(2)).sum::<f64>() / returns.len() as f64
+        returns
+            .iter()
+            .map(|r| (r - avg_return).powi(2))
+            .sum::<f64>()
+            / returns.len() as f64
     } else {
         0.0
     };
@@ -454,7 +467,11 @@ pub fn run_backtest(
 
     // Profit factor
     let gross_profit: f64 = trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).sum();
-    let gross_loss: f64 = trades.iter().filter(|t| t.pnl < 0.0).map(|t| t.pnl.abs()).sum();
+    let gross_loss: f64 = trades
+        .iter()
+        .filter(|t| t.pnl < 0.0)
+        .map(|t| t.pnl.abs())
+        .sum();
     let profit_factor = if gross_loss > 0.0 {
         gross_profit / gross_loss
     } else if gross_profit > 0.0 {
@@ -463,7 +480,12 @@ pub fn run_backtest(
         0.0
     };
 
-    eprintln!("DEBUG: evaluated {} markets, signals found {}, trades {}", debug_eval_count + debug_signal_count, debug_signal_count, trades.len());
+    eprintln!(
+        "DEBUG: evaluated {} markets, signals found {}, trades {}",
+        debug_eval_count + debug_signal_count,
+        debug_signal_count,
+        trades.len()
+    );
 
     BacktestResult {
         initial_capital: config.initial_capital,

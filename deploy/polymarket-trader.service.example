@@ -1,0 +1,25 @@
+[Unit]
+Description=Polymarket authenticated lifecycle monitor
+After=network-online.target polymarket-gamma.service
+Wants=network-online.target polymarket-gamma.service
+
+[Service]
+Type=simple
+User=polymarket
+Group=polymarket
+WorkingDirectory=/opt/polymarket/polymarket-bot
+EnvironmentFile=/etc/polymarket/production.env
+Environment=POLYMARKET_JSON_LOGS=true
+ExecStartPre=/opt/polymarket/polymarket-bot/target/release/polymarket-bot reconcile
+ExecStart=/opt/polymarket/polymarket-bot/target/release/polymarket-bot monitor-user-stream
+ExecStopPost=/opt/polymarket/polymarket-bot/target/release/polymarket-bot cancel-all-live --confirm CANCEL_ALL_OPEN_ORDERS
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/polymarket/polymarket-bot/data-production
+
+[Install]
+WantedBy=multi-user.target

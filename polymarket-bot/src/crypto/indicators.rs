@@ -19,7 +19,7 @@ impl Timeframe {
             Timeframe::D1 => "1d",
         }
     }
-    
+
     pub fn candle_count(&self) -> usize {
         match self {
             Timeframe::M5 => 5,
@@ -64,19 +64,19 @@ impl IndicatorEngine {
             rsi_period: 14,
         }
     }
-    
+
     pub fn calculate(&self, candles: &[Candle], timeframe: Timeframe) -> Option<IndicatorSet> {
         if candles.len() < self.ema_long_period {
             return None;
         }
-        
+
         let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
-        
+
         let ema_short = self.calculate_ema(&closes, self.ema_short_period)?;
         let ema_long = self.calculate_ema(&closes, self.ema_long_period)?;
         let adx = self.calculate_adx(candles, self.adx_period)?;
         let rsi = self.calculate_rsi(&closes, self.rsi_period)?;
-        
+
         let trend = if ema_short > ema_long && adx > 15.0 {
             Trend::Bullish
         } else if ema_short < ema_long && adx > 15.0 {
@@ -84,7 +84,7 @@ impl IndicatorEngine {
         } else {
             Trend::Neutral
         };
-        
+
         Some(IndicatorSet {
             timeframe,
             ema_short,
@@ -94,39 +94,41 @@ impl IndicatorEngine {
             trend,
         })
     }
-    
+
     fn calculate_ema(&self, data: &[f64], period: usize) -> Option<f64> {
         if data.len() < period {
             return None;
         }
-        
+
         let multiplier = 2.0 / (period as f64 + 1.0);
         let mut ema = data[..period].iter().sum::<f64>() / period as f64;
-        
+
         for &price in &data[period..] {
             ema = (price - ema) * multiplier + ema;
         }
-        
+
         Some(ema)
     }
-    
+
     fn calculate_adx(&self, candles: &[Candle], period: usize) -> Option<f64> {
         if candles.len() < period + 1 {
             return None;
         }
-        
+
         let mut tr_sum = 0.0;
         let mut plus_dm_sum = 0.0;
         let mut minus_dm_sum = 0.0;
-        
+
         for i in 1..=period {
             let high = candles[i].high;
             let low = candles[i].low;
             let prev_high = candles[i - 1].high;
             let prev_low = candles[i - 1].low;
             let prev_close = candles[i - 1].close;
-            
-            let tr = (high - low).max((high - prev_close).abs()).max((low - prev_close).abs());
+
+            let tr = (high - low)
+                .max((high - prev_close).abs())
+                .max((low - prev_close).abs());
             let plus_dm = if high - prev_high > prev_low - low && high - prev_high > 0.0 {
                 high - prev_high
             } else {
@@ -137,29 +139,41 @@ impl IndicatorEngine {
             } else {
                 0.0
             };
-            
+
             tr_sum += tr;
             plus_dm_sum += plus_dm;
             minus_dm_sum += minus_dm;
         }
-        
-        let plus_di = if tr_sum > 0.0 { (plus_dm_sum / tr_sum) * 100.0 } else { 0.0 };
-        let minus_di = if tr_sum > 0.0 { (minus_dm_sum / tr_sum) * 100.0 } else { 0.0 };
-        
+
+        let plus_di = if tr_sum > 0.0 {
+            (plus_dm_sum / tr_sum) * 100.0
+        } else {
+            0.0
+        };
+        let minus_di = if tr_sum > 0.0 {
+            (minus_dm_sum / tr_sum) * 100.0
+        } else {
+            0.0
+        };
+
         let di_sum = plus_di + minus_di;
-        let dx = if di_sum > 0.0 { ((plus_di - minus_di).abs() / di_sum) * 100.0 } else { 0.0 };
-        
+        let dx = if di_sum > 0.0 {
+            ((plus_di - minus_di).abs() / di_sum) * 100.0
+        } else {
+            0.0
+        };
+
         Some(dx)
     }
-    
+
     fn calculate_rsi(&self, data: &[f64], period: usize) -> Option<f64> {
         if data.len() < period + 1 {
             return None;
         }
-        
+
         let mut gains = 0.0;
         let mut losses = 0.0;
-        
+
         for i in 1..=period {
             let change = data[i] - data[i - 1];
             if change > 0.0 {
@@ -168,14 +182,14 @@ impl IndicatorEngine {
                 losses -= change;
             }
         }
-        
+
         let avg_gain = gains / period as f64;
         let avg_loss = losses / period as f64;
-        
+
         if avg_loss == 0.0 {
             return Some(100.0);
         }
-        
+
         let rs = avg_gain / avg_loss;
         Some(100.0 - (100.0 / (1.0 + rs)))
     }

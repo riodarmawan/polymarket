@@ -21,6 +21,29 @@ From the repository root:
 ./deploy/check-production.sh
 ```
 
+Inspect honest forward-test promotion metrics:
+
+```bash
+POLYMARKET_CONFIG="$PWD/polymarket-bot/config/production.toml" \
+  ./polymarket-bot/target/release/polymarket-bot forward-report
+```
+
+Inspect the production control plane and create a consistent backup:
+
+```bash
+POLYMARKET_CONFIG="$PWD/polymarket-bot/config/production.toml" \
+  ./polymarket-bot/target/release/polymarket-bot operational-status
+POLYMARKET_CONFIG="$PWD/polymarket-bot/config/production.toml" \
+  ./polymarket-bot/target/release/polymarket-bot backup
+```
+
+Prepare a locked local secret template for future live onboarding:
+
+```bash
+./deploy/init-production-secrets.sh
+./deploy/check-production-secrets.sh
+```
+
 Dashboard:
 
 ```text
@@ -39,4 +62,5 @@ git diff --check
 ```
 
 Read `docs/PRODUCTION_INSTALL.md` for installation and
-`docs/PRODUCTION_RUNBOOK.md` before touching production configuration.
+`docs/PRODUCTION_RUNBOOK.md` before touching production configuration. Read
+`docs/WALLET_ONBOARDING.md` before creating or funding a trading identity.

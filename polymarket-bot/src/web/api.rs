@@ -96,7 +96,9 @@ pub async fn get_health(State(state): State<AppState>) -> axum::Json<Value> {
         .count();
     let stale_markets = markets
         .iter()
-        .filter(|market| now - market.captured_at_ms > state.runtime.configured_max_data_age_ms as i64)
+        .filter(|market| {
+            now - market.captured_at_ms > state.runtime.configured_max_data_age_ms as i64
+        })
         .count();
     let price_ready = price.source == "live"
         && now - price.timestamp <= state.runtime.configured_max_data_age_ms as i64;
@@ -109,6 +111,18 @@ pub async fn get_health(State(state): State<AppState>) -> axum::Json<Value> {
     } else {
         "degraded"
     };
+    let (startup_state, startup_reason) = state.store.runtime_state().await.unwrap_or_else(|_| {
+        (
+            "unavailable".to_string(),
+            "database query failed".to_string(),
+        )
+    });
+    let open_incidents = state.store.open_incident_count().await.unwrap_or(-1);
+    let reconciliation_ready = state
+        .store
+        .latest_reconciliation_ready()
+        .await
+        .unwrap_or(false);
 
     axum::Json(json!({
         "overall": overall,
@@ -136,6 +150,15 @@ pub async fn get_health(State(state): State<AppState>) -> axum::Json<Value> {
             "total": markets.len()
         },
         "database": {"status": "ready"}
+        ,"production_control": {
+            "startup_state": startup_state,
+            "startup_reason": startup_reason,
+            "open_incidents": open_incidents,
+            "reconciliation_ready": reconciliation_ready,
+            "live_switch_enabled": std::env::var("POLYMARKET_LIVE_TRADING_ENABLED")
+                .map(|value| value == "I_UNDERSTAND_LIVE_TRADING")
+                .unwrap_or(false)
+        }
     }))
 }
 
@@ -212,6 +235,22 @@ pub async fn get_stats(State(state): State<AppState>) -> axum::Json<Value> {
         "5m": stats_json(&stats_5m),
         "current_capital": stats.current_capital + stats_5m.current_capital
     }))
+}
+
+pub async fn get_forward_report(State(state): State<AppState>) -> (StatusCode, axum::Json<Value>) {
+    match state.forward_report().await {
+        Ok(report) => (
+            StatusCode::OK,
+            axum::Json(
+                serde_json::to_value(report)
+                    .unwrap_or_else(|_| json!({"error": "serialization failed"})),
+            ),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({"error": error.to_string()})),
+        ),
+    }
 }
 
 fn stats_json(stats: &crate::web::state::StatsInfo) -> Value {

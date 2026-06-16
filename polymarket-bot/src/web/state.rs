@@ -1,5 +1,7 @@
 use crate::config::Config;
 use crate::crypto::binance_ws::Candle;
+use crate::engine::risk::{ExecutionIntent, RiskDecision};
+use crate::evaluation::{build_report, ForwardOpportunity, ForwardReport};
 use crate::storage::dashboard::{DashboardSnapshot, DashboardStore};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -82,6 +84,11 @@ pub struct RuntimeInfo {
     pub configured_min_edge: f64,
     pub configured_fee_pct: f64,
     pub configured_max_data_age_ms: u64,
+    pub configured_trading_enabled: bool,
+    pub configured_enable_5m: bool,
+    pub configured_enable_15m: bool,
+    pub configured_min_balance_reserve_usd: f64,
+    pub configured_max_fee_rate_bps: u64,
     pub gamma_base_url: String,
     pub clob_base_url: String,
 }
@@ -312,6 +319,13 @@ impl AppState {
                 }),
             )
             .await?;
+        let (runtime_state, _) = state.store.runtime_state().await?;
+        if runtime_state == "booting" {
+            state
+                .store
+                .set_runtime_state("ready", "dashboard initialized in paper mode")
+                .await?;
+        }
         Ok(state)
     }
 
@@ -344,22 +358,69 @@ impl AppState {
             .await
     }
 
-    pub async fn reserve_execution_intent(
+    pub async fn reserve_execution_intent(&self, intent: &ExecutionIntent) -> Result<bool> {
+        self.store
+            .reserve_execution_intent(
+                &intent.client_order_key,
+                &intent.market_slug,
+                &intent.timeframe,
+                &self.runtime.mode,
+                &self.runtime.strategy_version,
+                serde_json::to_value(intent)?,
+            )
+            .await
+    }
+
+    pub async fn record_risk_decision(
         &self,
         market_slug: &str,
         timeframe: &str,
-        detail: serde_json::Value,
-    ) -> Result<bool> {
+        decision: &RiskDecision,
+    ) -> Result<()> {
         self.store
-            .reserve_execution_intent(
-                market_slug,
+            .record_risk_decision(
                 market_slug,
                 timeframe,
                 &self.runtime.mode,
                 &self.runtime.strategy_version,
-                detail,
+                decision,
             )
             .await
+    }
+
+    pub async fn record_forward_opportunity(
+        &self,
+        market: &UpDownMarket,
+        signal: &SignalInfo,
+        decision: &RiskDecision,
+    ) -> Result<()> {
+        let direction_up = signal.direction == "Up";
+        self.store
+            .record_forward_opportunity(&ForwardOpportunity {
+                market_slug: market.slug.clone(),
+                timeframe: market.interval.clone(),
+                direction: signal.direction.clone(),
+                confidence: signal.confidence,
+                expected_fill_price: if direction_up {
+                    market.up_expected_fill_price
+                } else {
+                    market.down_expected_fill_price
+                },
+                spread: market.spread,
+                fee_rate_bps: market.fee_rate_bps,
+                approved: decision.approved,
+                reason_code: decision.reason_code.clone(),
+                captured_at_ms: market.captured_at_ms,
+                end_ts: market.end_ts,
+                official_outcome: None,
+            })
+            .await
+    }
+
+    pub async fn forward_report(&self) -> Result<ForwardReport> {
+        let opportunities = self.store.load_forward_opportunities().await?;
+        let trades = self.trades.read().await.clone();
+        Ok(build_report(&opportunities, &trades))
     }
 
     pub async fn halt_after_persistence_failure(&self, context: &str, error: &anyhow::Error) {
@@ -392,6 +453,11 @@ impl RuntimeInfo {
             configured_min_edge: config.expected_value.min_edge_pct.max(0.10),
             configured_fee_pct: config.expected_value.cost_per_trade_pct,
             configured_max_data_age_ms: config.risk.max_data_age_ms,
+            configured_trading_enabled: config.risk.trading_enabled,
+            configured_enable_5m: config.risk.enable_5m,
+            configured_enable_15m: config.risk.enable_15m,
+            configured_min_balance_reserve_usd: config.risk.min_balance_reserve_usd,
+            configured_max_fee_rate_bps: config.risk.max_fee_rate_bps,
             gamma_base_url: config.api.gamma_base_url.clone(),
             clob_base_url: config.api.clob_base_url.clone(),
         }
@@ -468,7 +534,10 @@ mod tests {
         state.stats.write().await.current_capital = 1.898;
         state.stats_5m.write().await.total_pnl = 0.098;
         state
-            .persist("restart_test", serde_json::json!({"step": "before_restart"}))
+            .persist(
+                "restart_test",
+                serde_json::json!({"step": "before_restart"}),
+            )
             .await
             .unwrap();
         drop(state);

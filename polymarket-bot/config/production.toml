@@ -4,6 +4,9 @@ mode = "paper"
 strategy_version = "btc-updown-v2"
 
 [risk]
+trading_enabled = true
+enable_5m = true
+enable_15m = true
 max_open_positions = 1
 max_order_usd = 0.10
 max_daily_orders = 3
@@ -12,6 +15,8 @@ max_drawdown = 0.20
 max_consecutive_losses = 3
 max_spread = 0.04
 max_data_age_ms = 15000
+min_balance_reserve_usd = 0.20
+max_fee_rate_bps = 500
 
 [execution]
 order_type = "FOK"

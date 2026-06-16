@@ -1,6 +1,7 @@
 pub mod analyzers;
 pub mod api;
 pub mod backtesting;
+pub mod build_info;
 pub mod cli;
 pub mod collector;
 pub mod config;
@@ -8,6 +9,8 @@ pub mod crypto;
 pub mod dashboard;
 pub mod engine;
 pub mod error;
+pub mod evaluation;
+pub mod execution;
 pub mod models;
 pub mod paper_trading;
 pub mod production;
@@ -22,11 +25,30 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    if std::env::var("POLYMARKET_JSON_LOGS").as_deref() == Ok("true") {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
 
     let cli = Cli::parse();
     let config = Config::load()?;
-    config.print_startup_summary();
+    let json_stdout = matches!(
+        &cli.command,
+        Commands::ProductionReadiness { json: true, .. }
+            | Commands::StrategyManifest
+            | Commands::ForwardReport
+            | Commands::CanaryReview { .. }
+            | Commands::MonitorForward { .. }
+            | Commands::OperationalStatus
+            | Commands::VerifyDatabase { .. }
+    );
+    if !json_stdout {
+        config.print_startup_summary();
+    }
 
     match cli.command {
         Commands::Collect { daemon, interval } => {
@@ -398,7 +420,14 @@ async fn main() -> anyhow::Result<()> {
                             let emoji = if t.won { "✓" } else { "✗" };
                             println!(
                                 "  {} {:?} {} BTC {:.2} -> {:.2} | Ask: {:.2} Model margin: {:.1}% | PnL: ${:.2}",
-                                emoji, t.timeframe, t.direction, t.entry_price, t.exit_price, t.market_price, t.edge * 100.0, t.pnl
+                                emoji,
+                                t.timeframe,
+                                t.direction,
+                                t.entry_price,
+                                t.exit_price,
+                                t.market_price,
+                                t.edge * 100.0,
+                                t.pnl
                             );
                         }
                     }
@@ -425,8 +454,588 @@ async fn main() -> anyhow::Result<()> {
         Commands::ProductionCheck => {
             production::run_preflight(&config).await?;
         }
-        Commands::ProductionReadiness => {
-            production::print_readiness(&config);
+        Commands::ProductionReadiness {
+            json,
+            require_canary_ready,
+        } => {
+            production::print_readiness(&config, json, require_canary_ready).await?;
+        }
+        Commands::StrategyManifest => {
+            let build = build_info::BuildInfo::current();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "strategy_version": config.runtime.strategy_version,
+                    "build": {
+                        "package_version": build.package_version,
+                        "git_sha": build.git_sha,
+                        "git_dirty": build.git_dirty,
+                        "build_timestamp": build.build_timestamp,
+                    },
+                    "parameters": crypto::strategy::StrategyParameters::default(),
+                }))?
+            );
+        }
+        Commands::ForwardReport => {
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+            let opportunities = store.load_forward_opportunities().await?;
+            let trades = store
+                .load_snapshot()
+                .await?
+                .map(|snapshot| snapshot.trades)
+                .unwrap_or_default();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&evaluation::build_report(&opportunities, &trades))?
+            );
+        }
+        Commands::MonitorForward {
+            interval_secs,
+            max_iterations,
+        } => {
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+            let mut iterations = 0_u64;
+            loop {
+                let opportunities = store.load_forward_opportunities().await?;
+                let trades = store
+                    .load_snapshot()
+                    .await?
+                    .map(|snapshot| snapshot.trades)
+                    .unwrap_or_default();
+                let report = evaluation::build_report(&opportunities, &trades);
+                let decision = evaluation::monitor_decision(&report);
+                let summary = serde_json::json!({
+                    "generated_at_ms": report.generated_at_ms,
+                    "status": decision.status,
+                    "should_halt_runtime": decision.should_halt_runtime,
+                    "reasons": decision.reasons,
+                    "settled_trades": report.settled_trades,
+                    "executable_trade_accuracy": report.executable_trade_accuracy,
+                    "profit_factor": report.profit_factor,
+                    "max_drawdown_usd": report.max_drawdown_usd,
+                    "settlement_mismatches": report.settlement_mismatches,
+                    "promotion_ready": report.promotion_ready,
+                    "promotion_reasons": report.promotion_reasons,
+                });
+                store
+                    .audit_event(
+                        "forward_monitor_report",
+                        &config.runtime.mode.to_string(),
+                        &config.runtime.strategy_version,
+                        serde_json::json!({
+                            "summary": summary,
+                            "decision": decision,
+                            "report": report,
+                        }),
+                    )
+                    .await?;
+
+                if decision.should_halt_runtime {
+                    store
+                        .set_runtime_state("halted", "forward-test monitor breach")
+                        .await?;
+                    store
+                        .open_incident(
+                            "forward-monitor-halt",
+                            "forward_monitor_halt",
+                            serde_json::json!({ "summary": summary }),
+                        )
+                        .await?;
+                }
+
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+
+                iterations += 1;
+                if max_iterations > 0 && iterations >= max_iterations {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+            }
+        }
+        Commands::DrySign {
+            token_id,
+            price,
+            size,
+        } => {
+            let report =
+                execution::dry_signed::create_from_environment(&token_id, &price, &size).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Commands::Reconcile => {
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+            store
+                .set_runtime_state("preflight", "authenticated account preflight")
+                .await?;
+            store
+                .set_runtime_state("reconciling", "querying authenticated CLOB state")
+                .await?;
+            let remote = match execution::dry_signed::reconcile_from_environment().await {
+                Ok(remote) => remote,
+                Err(error) => {
+                    store
+                        .set_runtime_state("halted", "authenticated reconciliation failed")
+                        .await?;
+                    store
+                        .open_incident(
+                            "reconciliation-request-failed",
+                            "reconciliation_failure",
+                            serde_json::json!({"message": error.to_string()}),
+                        )
+                        .await?;
+                    return Err(error);
+                }
+            };
+            store
+                .resolve_incident("reconciliation-request-failed")
+                .await?;
+            let remote_open: std::collections::HashSet<_> =
+                remote.open_order_ids.iter().cloned().collect();
+            let remote_trades: std::collections::HashSet<_> =
+                remote.trade_order_ids.iter().cloned().collect();
+            store
+                .apply_remote_order_evidence(&remote_open, &remote_trades)
+                .await?;
+            let local_ids = store.local_non_terminal_remote_ids().await?;
+            let unresolved_without_remote_id =
+                store.local_non_terminal_without_remote_id_count().await?;
+            let local_positions = store.local_positions().await?;
+            let remote_positions: Vec<_> = remote
+                .positions
+                .iter()
+                .map(|position| (position.token_id.clone(), position.size.clone()))
+                .collect();
+            let assessment = execution::recovery::assess(
+                &local_ids,
+                unresolved_without_remote_id,
+                &remote.open_order_ids,
+                &remote.trade_order_ids,
+                &local_positions,
+                &remote_positions,
+            );
+            let report = store
+                .record_reconciliation(
+                    true,
+                    assessment.mismatch_count,
+                    serde_json::json!({"remote": remote, "assessment": assessment}),
+                )
+                .await?;
+            if report.ready {
+                store
+                    .set_runtime_state("ready", "authenticated reconciliation passed")
+                    .await?;
+            } else {
+                store.set_runtime_state("halted", &report.reason).await?;
+                store
+                    .open_incident(
+                        &format!("reconciliation-mismatch-{}", chrono::Utc::now().timestamp()),
+                        "reconciliation_mismatch",
+                        serde_json::to_value(&report)?,
+                    )
+                    .await?;
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.ready {
+                anyhow::bail!("reconciliation blocked execution: {}", report.reason);
+            }
+        }
+        Commands::AuthorizeCanary {
+            client_key,
+            max_usd,
+            expires_minutes,
+            confirm,
+        } => {
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+            let opportunities = store.load_forward_opportunities().await?;
+            let trades = store
+                .load_snapshot()
+                .await?
+                .map(|snapshot| snapshot.trades)
+                .unwrap_or_default();
+            let forward = evaluation::build_report(&opportunities, &trades);
+            let reconciliation_ready = store.latest_reconciliation_ready().await?;
+            let live_switch_enabled = std::env::var("POLYMARKET_LIVE_TRADING_ENABLED")
+                .map(|value| value == "I_UNDERSTAND_LIVE_TRADING")
+                .unwrap_or(false);
+            execution::lifecycle::validate_canary_authorization(
+                &confirm,
+                max_usd,
+                config.risk.max_order_usd,
+                forward.promotion_ready,
+                reconciliation_ready,
+                live_switch_enabled,
+            )?;
+            let intent = store
+                .load_execution_intent(&client_key)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("unknown durable execution intent"))?;
+            if (intent.requested_usd.as_f64() - max_usd).abs() > 0.000_001 {
+                anyhow::bail!(
+                    "authorization amount must exactly match intent amount ${:.6}",
+                    intent.requested_usd.as_f64()
+                );
+            }
+            let expires_at_ms =
+                chrono::Utc::now().timestamp_millis() + expires_minutes.clamp(1, 30) * 60_000;
+            let authorization_id = store
+                .issue_canary_authorization(&client_key, max_usd, expires_at_ms)
+                .await?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "authorized": true,
+                    "authorization_id": authorization_id,
+                    "client_key": &client_key,
+                    "max_usd": max_usd,
+                    "expires_at_ms": expires_at_ms,
+                    "submitted": false
+                })
+            );
+        }
+        Commands::CanaryReview { client_key } => {
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+            let readiness = production::build_readiness_report(&config).await;
+            let intent = store
+                .load_execution_intent(&client_key)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("unknown durable execution intent"))?;
+            let intent_amount_usd = intent.requested_usd.as_f64();
+            let intent_checks = serde_json::json!({
+                "client_key_matches": intent.client_order_key == client_key,
+                "within_configured_max_order_usd": intent_amount_usd <= config.risk.max_order_usd,
+                "strategy_version_matches": intent.strategy_version == config.runtime.strategy_version,
+                "risk_checks_all_passed": intent.risk_checks.iter().all(|check| check.passed),
+                "order_type": config.execution.order_type,
+                "fok_only": config.execution.order_type == "FOK",
+            });
+            let intent_ready = intent.client_order_key == client_key
+                && intent_amount_usd <= config.risk.max_order_usd
+                && intent.strategy_version == config.runtime.strategy_version
+                && intent.risk_checks.iter().all(|check| check.passed)
+                && config.execution.order_type == "FOK";
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "review_ready": readiness.canary_ready && intent_ready,
+                    "submitted": false,
+                    "authorization_issued": false,
+                    "client_key": client_key,
+                    "intent": intent,
+                    "intent_checks": intent_checks,
+                    "readiness": readiness,
+                    "strategy_manifest": {
+                        "strategy_version": config.runtime.strategy_version,
+                        "parameters": crypto::strategy::StrategyParameters::default(),
+                    },
+                    "operator_next_steps": {
+                        "authorize_command": format!(
+                            "authorize-canary --client-key {} --max-usd {:.6} --confirm {}",
+                            &client_key,
+                            intent_amount_usd,
+                            execution::lifecycle::CANARY_CONFIRMATION
+                        ),
+                        "submit_command": format!(
+                            "submit-canary --authorization-id <authorization_id> --client-key {} --confirm {}",
+                            &client_key,
+                            execution::live::SUBMIT_CANARY_CONFIRMATION
+                        ),
+                        "note": "Do not run authorization or submission until review_ready is true and the exact intent is manually approved."
+                    }
+                }))?
+            );
+        }
+        Commands::SubmitCanary {
+            authorization_id,
+            client_key,
+            confirm,
+        } => {
+            if confirm != execution::live::SUBMIT_CANARY_CONFIRMATION {
+                anyhow::bail!("exact submit-canary confirmation phrase is required");
+            }
+            production::run_preflight(&config).await?;
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+            let opportunities = store.load_forward_opportunities().await?;
+            let trades = store
+                .load_snapshot()
+                .await?
+                .map(|snapshot| snapshot.trades)
+                .unwrap_or_default();
+            let forward = evaluation::build_report(&opportunities, &trades);
+            if !forward.promotion_ready {
+                anyhow::bail!("forward-test promotion gates have not passed");
+            }
+            if !store.latest_reconciliation_ready().await? {
+                anyhow::bail!("fresh successful reconciliation is required");
+            }
+            let intent = store
+                .load_execution_intent(&client_key)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("unknown durable execution intent"))?;
+            if intent.requested_usd.as_f64() > config.risk.max_order_usd {
+                anyhow::bail!("intent exceeds configured maximum order amount");
+            }
+            let executor = execution::live::SdkOrderExecutor::new(
+                config.execution.heartbeat_interval_secs,
+                config.risk.max_fee_rate_bps,
+                config.risk.min_balance_reserve_usd,
+            );
+            let result = execution::live::execute_authorized_canary(
+                &store,
+                &executor,
+                &authorization_id,
+                &intent,
+            )
+            .await;
+            store
+                .set_runtime_state("halted", "post-canary reconciliation required")
+                .await?;
+            match result {
+                Ok(outcome) => println!("{}", serde_json::to_string_pretty(&outcome)?),
+                Err(error) => {
+                    store
+                        .open_incident(
+                            &format!("ambiguous-canary-{}", client_key),
+                            "ambiguous_order_submission",
+                            serde_json::json!({"client_key": client_key}),
+                        )
+                        .await?;
+                    return Err(error);
+                }
+            }
+        }
+        Commands::CancelAllLive { confirm } => {
+            use execution::live::OrderExecutor;
+            if confirm != execution::live::CANCEL_ALL_CONFIRMATION {
+                anyhow::bail!("exact cancel-all confirmation phrase is required");
+            }
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+            store
+                .set_runtime_state("halted", "emergency cancel-all initiated")
+                .await?;
+            store.mark_remote_orders_cancel_pending().await?;
+            let executor = execution::live::SdkOrderExecutor::new(
+                config.execution.heartbeat_interval_secs,
+                config.risk.max_fee_rate_bps,
+                config.risk.min_balance_reserve_usd,
+            );
+            let outcome = executor.cancel_all().await?;
+            store
+                .mark_remote_orders_cancelled(&outcome.canceled)
+                .await?;
+            if outcome.not_canceled > 0 {
+                store
+                    .open_incident(
+                        &format!("cancel-all-incomplete-{}", chrono::Utc::now().timestamp()),
+                        "cancel_all_incomplete",
+                        serde_json::to_value(&outcome)?,
+                    )
+                    .await?;
+            }
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
+        Commands::Incidents => {
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&store.load_open_incidents().await?)?
+            );
+        }
+        Commands::ResolveIncident {
+            incident_key,
+            confirm,
+        } => {
+            if confirm != "I_INVESTIGATED_AND_RESOLVE_THIS_INCIDENT" {
+                anyhow::bail!("exact incident-resolution confirmation phrase is required");
+            }
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+            if !store.resolve_incident(&incident_key).await? {
+                anyhow::bail!("incident does not exist or is already resolved");
+            }
+            store
+                .set_runtime_state(
+                    "halted",
+                    "incident resolved; fresh reconciliation is still required",
+                )
+                .await?;
+            println!("Incident resolved. Run authenticated reconciliation before execution.");
+        }
+        Commands::MonitorUserStream { max_events } => {
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+            let events = execution::user_stream::monitor(&store, max_events).await?;
+            println!("Processed {events} authenticated user event(s)");
+        }
+        Commands::PlanRedemptions => {
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+            let remote = execution::dry_signed::reconcile_from_environment().await?;
+            let local_ids = store.local_non_terminal_remote_ids().await?;
+            let local_without_remote_id =
+                store.local_non_terminal_without_remote_id_count().await?;
+            let local_positions = store.local_positions().await?;
+            let remote_positions: Vec<_> = remote
+                .positions
+                .iter()
+                .map(|position| (position.token_id.clone(), position.size.clone()))
+                .collect();
+            let assessment = execution::recovery::assess(
+                &local_ids,
+                local_without_remote_id,
+                &remote.open_order_ids,
+                &remote.trade_order_ids,
+                &local_positions,
+                &remote_positions,
+            );
+            if assessment.state != execution::recovery::StartupState::Ready {
+                store
+                    .set_runtime_state("halted", "redemption planning found remote/local mismatch")
+                    .await?;
+                store
+                    .open_incident(
+                        "redemption-planning-mismatch",
+                        "redemption_reconciliation_mismatch",
+                        serde_json::to_value(&assessment)?,
+                    )
+                    .await?;
+                anyhow::bail!("redemption planning blocked by remote/local mismatch");
+            }
+            let redeemable: Vec<_> = remote
+                .positions
+                .iter()
+                .filter(|position| position.redeemable)
+                .collect();
+            for position in &redeemable {
+                store
+                    .record_redemption_plan(
+                        &position.condition_id,
+                        &position.token_id,
+                        &position.market_slug,
+                        &position.size,
+                        serde_json::to_value(position)?,
+                    )
+                    .await?;
+            }
+            if !redeemable.is_empty() {
+                store
+                    .set_runtime_state(
+                        "halted",
+                        "redeemable positions require operator-reviewed Relayer execution",
+                    )
+                    .await?;
+                store
+                    .open_incident(
+                        "redeemable-positions-pending",
+                        "redemption_required",
+                        serde_json::json!({"count": redeemable.len()}),
+                    )
+                    .await?;
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "remote_checked": true,
+                    "redeemable_positions": redeemable.len(),
+                    "submitted": false,
+                    "relayer_execution_implemented": false,
+                    "reason": "POLY_1271 deposit-wallet redemption must use an operator-reviewed Relayer V2 batch",
+                    "plans": store.load_redemption_plans().await?
+                }))?
+            );
+        }
+        Commands::OperationalStatus => {
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+            let opportunities = store.load_forward_opportunities().await?;
+            let trades = store
+                .load_snapshot()
+                .await?
+                .map(|snapshot| snapshot.trades)
+                .unwrap_or_default();
+            let forward = evaluation::build_report(&opportunities, &trades);
+            let live_switch_enabled = std::env::var("POLYMARKET_LIVE_TRADING_ENABLED")
+                .map(|value| value == "I_UNDERSTAND_LIVE_TRADING")
+                .unwrap_or(false);
+            let reconciliation_ready = store.latest_reconciliation_ready().await?;
+            let canary_control_gates_ready =
+                forward.promotion_ready && reconciliation_ready && live_switch_enabled;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "runtime_mode": config.runtime.mode.to_string(),
+                    "live_submission_implemented": true,
+                    "live_switch_enabled": live_switch_enabled,
+                    "forward_promotion_ready": forward.promotion_ready,
+                    "forward_promotion_reasons": forward.promotion_reasons,
+                    "reconciliation_ready": reconciliation_ready,
+                    "local_non_terminal_orders": store.local_non_terminal_order_count().await?,
+                    "open_incidents": store.open_incident_count().await?,
+                    "startup_state": store.runtime_state().await?.0,
+                    "canary_control_gates_ready": canary_control_gates_ready,
+                    "canary_submission_ready": false,
+                    "canary_submission_ready_reason":
+                        "requires successful production-host preflight, new uncompromised identity, dry-sign validation, operator review, and all phase acceptance criteria"
+                }))?
+            );
+        }
+        Commands::Backup { destination } => {
+            let store = storage::dashboard::DashboardStore::open(std::path::Path::new(
+                &config.storage.database_path,
+            ))
+            .await?;
+            let destination = destination
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::path::Path::new(&config.storage.backup_directory).join(format!(
+                        "trading-{}.db",
+                        chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+                    ))
+                });
+            store.backup_to(&destination).await?;
+            println!("Backup created: {}", destination.display());
+        }
+        Commands::VerifyDatabase { path } => {
+            storage::dashboard::DashboardStore::verify_integrity(std::path::Path::new(&path))
+                .await?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": true,
+                    "path": path,
+                    "integrity_check": "ok"
+                })
+            );
         }
     }
 

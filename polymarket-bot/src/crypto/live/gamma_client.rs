@@ -256,7 +256,10 @@ impl ClobOrderBook {
     }
 
     pub fn tick_size(&self) -> Option<f64> {
-        self.tick_size.parse::<f64>().ok().filter(|value| *value > 0.0)
+        self.tick_size
+            .parse::<f64>()
+            .ok()
+            .filter(|value| *value > 0.0)
     }
 
     pub fn min_order_size(&self) -> Option<f64> {
@@ -451,7 +454,8 @@ impl ClobClient {
 
     pub async fn fetch_fee_rate_bps(&self, token_id: &str) -> Result<u64> {
         let url = self.endpoint(&format!("/fee-rate?token_id={}", token_id));
-        let response: serde_json::Value = send_with_retry(self.client.get(&url)).await?.json().await?;
+        let response: serde_json::Value =
+            send_with_retry(self.client.get(&url)).await?.json().await?;
         response
             .get("base_fee")
             .or_else(|| response.get("fee_rate_bps"))

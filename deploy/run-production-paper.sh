@@ -6,10 +6,20 @@ BOT_DIR="$ROOT/polymarket-bot"
 CONFIG="$BOT_DIR/config/production.toml"
 LOG_DIR="${POLYMARKET_LOG_DIR:-$BOT_DIR/data-production/logs}"
 
+if [[ -f "$HOME/.cargo/env" ]]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+
+command -v cargo >/dev/null || {
+  echo "cargo is not available; install Rust or add it to PATH" >&2
+  exit 1
+}
+
 mkdir -p "$LOG_DIR"
 
-cargo build --release --manifest-path "$ROOT/Cargo.toml"
-cargo build --release --manifest-path "$BOT_DIR/Cargo.toml"
+cargo build --release --locked --manifest-path "$ROOT/Cargo.toml"
+cargo build --release --locked --manifest-path "$BOT_DIR/Cargo.toml"
 
 pkill -f 'target/release/polymarket-bot web --port 3001' 2>/dev/null || true
 pkill -f 'target/release/polymarket-gamma' 2>/dev/null || true
@@ -19,7 +29,7 @@ nohup "$ROOT/target/release/polymarket-gamma" \
 
 (
   cd "$BOT_DIR"
-  nohup env POLYMARKET_CONFIG="$CONFIG" \
+  nohup env POLYMARKET_CONFIG="$CONFIG" POLYMARKET_DASHBOARD_BIND="0.0.0.0:3001" \
     "$BOT_DIR/target/release/polymarket-bot" web --port 3001 \
     >"$LOG_DIR/dashboard.log" 2>&1 &
 )

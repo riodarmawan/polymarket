@@ -1,5 +1,5 @@
-use crate::crypto::signals::Direction;
 use crate::crypto::indicators::Timeframe;
+use crate::crypto::signals::Direction;
 
 #[derive(Debug, Clone)]
 pub struct Trade {
@@ -181,32 +181,39 @@ impl PaperTradingEngine {
     }
 
     pub fn stats(&self) -> Stats {
-        let completed: Vec<&Trade> = self.trades.iter()
+        let completed: Vec<&Trade> = self
+            .trades
+            .iter()
             .filter(|t| t.status != TradeStatus::Open)
             .collect();
 
         let total = completed.len();
-        let wins = completed.iter().filter(|t| t.pnl.map_or(false, |p| p > 0.0)).count();
+        let wins = completed
+            .iter()
+            .filter(|t| t.pnl.map_or(false, |p| p > 0.0))
+            .count();
         let losses = total - wins;
 
-        let total_pnl: f64 = completed.iter()
-            .filter_map(|t| t.pnl)
-            .sum();
+        let total_pnl: f64 = completed.iter().filter_map(|t| t.pnl).sum();
 
         let avg_win = if wins > 0 {
-            completed.iter()
+            completed
+                .iter()
                 .filter_map(|t| t.pnl)
                 .filter(|p| *p > 0.0)
-                .sum::<f64>() / wins as f64
+                .sum::<f64>()
+                / wins as f64
         } else {
             0.0
         };
 
         let avg_loss = if losses > 0 {
-            completed.iter()
+            completed
+                .iter()
                 .filter_map(|t| t.pnl)
                 .filter(|p| *p < 0.0)
-                .sum::<f64>() / losses as f64
+                .sum::<f64>()
+                / losses as f64
         } else {
             0.0
         };
@@ -223,7 +230,11 @@ impl PaperTradingEngine {
             total_trades: total,
             wins,
             losses,
-            win_rate: if total > 0 { wins as f64 / total as f64 } else { 0.0 },
+            win_rate: if total > 0 {
+                wins as f64 / total as f64
+            } else {
+                0.0
+            },
             total_pnl,
             avg_win,
             avg_loss,

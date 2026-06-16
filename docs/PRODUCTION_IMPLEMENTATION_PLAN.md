@@ -119,8 +119,16 @@ Rules:
 **Status as of June 15, 2026:** foundation implemented. Typed runtime/risk/
 execution/storage/dashboard config, paper-only startup validation, startup
 identity logging, dashboard risk ceilings, and `production-readiness` are in
-place. Build provenance/dirty-tree gating and full strategy-parameter
-extraction remain before Phase 0 is complete.
+place. Build provenance is now captured at compile time and exposed in startup
+logs/readiness output; canary/live validation rejects unknown or dirty builds,
+except for an explicit development-only dirty-build override. Core 5m/15m
+strategy parameters are extracted into a serializable manifest and exported by
+`strategy-manifest`. `production-readiness` now emits text or JSON evidence
+from build provenance, database integrity, forward metrics, runtime state,
+incidents, reconciliation, and the explicit live switch, and can exit non-zero
+with `--require-canary-ready` for promotion automation. Remaining
+legacy/backtest parameter cleanup can continue without blocking paper-only
+operation.
 
 ### Tasks
 
@@ -129,6 +137,8 @@ extraction remain before Phase 0 is complete.
 - Make startup print the runtime mode, config path, database path, build
   version, and strategy version.
 - Add a strategy version constant and include it on every signal/trade.
+- Add a strategy manifest command that exports active model parameters with
+  build provenance.
 - Remove hard-coded risk parameters from `web/mod.rs`; load them from typed
   config.
 - Validate production config values and reject unsafe combinations.
@@ -141,6 +151,13 @@ extraction remain before Phase 0 is complete.
 - Invalid or missing production config causes startup failure.
 - Every dashboard signal exposes strategy version and runtime mode.
 - Unit tests prove defaults are paper-only and fail closed.
+- Startup/readiness output includes package version, git revision, dirty flag,
+  and build timestamp.
+- Strategy manifest output exposes the active model thresholds for audit.
+- Readiness output includes machine-readable canary blockers backed by current
+  database/runtime evidence.
+- Canary promotion automation can require readiness with a fail-closed exit
+  code.
 
 ## Phase 1: Durable State and Audit Log
 
@@ -236,6 +253,14 @@ entries from available depth rather than the best ask alone.
 
 **Goal:** eliminate behavior differences between paper and live execution.
 
+**Status as of June 15, 2026:** complete. Both 5m and 15m paper
+executors now pass their proposed orders through the same central final risk
+authority. The shared pipeline creates deterministic fixed-point execution
+intents, enforces global portfolio limits and configurable kill switches, and
+persists structured approved/rejected risk decisions. Signal evaluation now
+lives in a strategy service and both timeframes execute through one unified
+paper execution path.
+
 ### Tasks
 
 - Move signal generation out of `web/mod.rs` into strategy services.
@@ -274,6 +299,17 @@ entries from available depth rather than the best ask alone.
 
 **Goal:** generate evidence that reflects executable Polymarket conditions.
 
+**Status as of June 15, 2026:** complete. Every actionable strategy opportunity
+is stored once per market window with its executable CLOB quote, spread, fee,
+central-risk result, and eventual official Polymarket outcome. Rolling and
+daily evaluation reports are available through `forward-report` and
+`/api/forward-report`, including accuracy, fill ratio, PnL, profit factor,
+drawdown, Brier score, settlement mismatches, rejection reasons, and segmented
+results. `monitor-forward` records the same evidence as an audit event and
+fails closed by halting runtime plus opening `forward-monitor-halt` if
+settlement mismatches or a $0.40 drawdown breach are detected. Promotion remains
+blocked until the report reaches the required sample and thresholds.
+
 ### Tasks
 
 - Run paper executor against real CLOB snapshots and executable depth.
@@ -289,6 +325,8 @@ entries from available depth rather than the best ask alone.
   - results by timeframe, hour, ask band, spread band, and regime;
   - Binance-versus-official-outcome mismatch rate.
 - Add a report command and JSON export suitable for automated evaluation.
+- Add a scheduled forward monitor that records audit evidence and halts on
+  settlement mismatch or drawdown breach.
 - Do not auto-tune production thresholds. Parameter changes require a new
   strategy version and a documented comparison.
 
@@ -298,10 +336,18 @@ entries from available depth rather than the best ask alone.
 - No unresolved settlement mismatch.
 - Reports can reproduce every aggregate from persisted rows.
 - Promotion gate: win rate >= 68%, profit factor >= 1.40, max drawdown <= 20%.
+- Forward monitor can run as a five-minute systemd timer and fails closed on
+  evidence breaches.
 
 ## Phase 5: CLOB V2 Authentication and Dry-Signed Orders
 
 **Goal:** prove the program can safely build valid orders without submitting.
+
+**Status as of June 15, 2026:** implementation-ready, validation pending. The
+official Rust CLOB V2 SDK builds and signs POLY_1271 FOK orders locally without
+submission. A secret-provider boundary and redacted debug output are tested.
+Completion requires a new, unexposed signer/deposit wallet and a successful
+production-host dry-sign.
 
 ### Tasks
 
@@ -330,6 +376,16 @@ entries from available depth rather than the best ask alone.
 ## Phase 6: Live Order Lifecycle
 
 **Goal:** correctly manage an order from intent through fill and settlement.
+
+**Status as of June 15, 2026:** implementation substantially complete,
+acceptance pending. FOK submission, immediate pre-submit checks, heartbeat,
+authenticated user WebSocket monitoring, deterministic idempotency, atomic
+capital reservation, cancel-all, and ambiguous-timeout handling are
+implemented and tested. User-stream fills are persisted idempotently into
+local positions, and authenticated reconciliation now compares remote Data API
+positions against durable local positions. Actual Relayer V2 redemption
+execution, capital-ledger-vs-balance proof, and production lifecycle drills
+remain pending.
 
 ### Tasks
 
@@ -363,6 +419,13 @@ entries from available depth rather than the best ask alone.
 
 **Goal:** make process and host restarts safe.
 
+**Status as of June 15, 2026:** recovery implementation complete, production
+validation pending. The startup state machine, authenticated reconciliation,
+ID-level local/remote order comparison, local/remote position comparison,
+durable incident markers, and explicit operator resolution fail closed on
+unknown or ambiguous orders/positions. Production-host restart and
+open-position recovery drills with a new identity remain pending.
+
 ### Tasks
 
 - Add startup state machine:
@@ -390,6 +453,14 @@ entries from available depth rather than the best ask alone.
 
 **Goal:** operate the system predictably on a dedicated host.
 
+**Status as of June 15, 2026:** operational implementation complete, host
+validation pending. The repository contains hardened service examples,
+reconciliation and backup timers, consistent SQLite backup/restore commands,
+secret permission checks, repository secret scanning, JSON logs, health/control
+status, dependency audit, SBOM CI, and a non-live production-paper drill that
+checks health, forward monitoring, backup integrity, and canary blocking.
+Reboot, restore, credential-rotation, and alert drills remain pending.
+
 ### Tasks
 
 - Create separate supervised services:
@@ -400,6 +471,7 @@ entries from available depth rather than the best ask alone.
   remote dashboard access is required.
 - Run as a dedicated non-root OS user.
 - Store secrets outside Git with mode `0600`.
+- Run repository secret scanning before release/canary review.
 - Add structured JSON logs with secret redaction and rotation.
 - Add health/readiness endpoints that expose no secrets.
 - Add metrics/alerts for:
@@ -422,10 +494,21 @@ entries from available depth rather than the best ask alone.
   ready.
 - Restore, credential rotation, and rollback drills are documented and tested.
 - Dashboard cannot enable live trading.
+- Repository secret scan passes in local checks and CI.
+- Non-live production-paper drill passes without wallet credentials.
 
 ## Phase 9: Canary and Live Promotion
 
 **Goal:** permit the smallest possible controlled live experiment.
+
+**Status as of June 15, 2026:** guarded canary path implemented, live canary
+not authorized. Authorization requires the exact manual phrase, forward
+promotion, fresh reconciliation, explicit live switch, and an amount within
+the configured ceiling. `submit-canary` consumes it atomically once, submits
+FOK only, then forces `HALTED`. `canary-review` emits a redacted JSON operator
+packet for the exact durable intent without authorizing, signing, or submitting.
+The live experiment remains blocked until all external acceptance criteria and
+operator review pass.
 
 ### Canary Requirements
 
@@ -437,6 +520,8 @@ entries from available depth rather than the best ask alone.
 - Balance and approvals are confirmed.
 - At least 200 settled forward-test trades pass promotion metrics.
 - Operator reviews the exact canary intent before submission.
+  Generate the review packet with `canary-review --client-key <client_key>` and
+  require `review_ready=true` before authorization.
 
 ### Canary Behavior
 
@@ -588,8 +673,9 @@ Production validation must reject:
 - `cargo clippy -- -D warnings` for new production modules
 - unit/integration/recovery tests
 - dependency and secret scan
+- fail-closed repository secret scan
 - build artifact checksum/version
-- production readiness report
+- production readiness report, including the JSON form for CI/operator gates
 
 ## 9. Implementation Order and Dependencies
 
@@ -618,6 +704,7 @@ The program is ready for a manual $0.10 canary only when:
 - state, ledger, breakers, and audit logs survive restart;
 - paper and shadow use the same execution intents as live;
 - 200+ forward trades meet promotion metrics;
+- forward monitor has no open `forward-monitor-halt` incident;
 - official settlement mismatches are zero;
 - CLOB V2 dry-signed order verification passes;
 - balances, approvals, tick size, minimum size, fee, and depth are validated;

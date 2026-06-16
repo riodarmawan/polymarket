@@ -12,11 +12,13 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 anyhow = "1"
+async-trait = "0.1"
+alloy-signer-local = "1.8.3"
 dotenvy = "0.15"
 toml = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4"] }
 ratatui = "0.29"
 crossterm = "0.28"
@@ -29,6 +31,7 @@ tokio-tungstenite = "0.26"
 rust-embed = "8"
 mime = "0.3"
 futures = "0.3"
+polymarket_client_sdk_v2 = { version = "0.6.0-canary.1", features = ["clob", "data", "heartbeats", "ws"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

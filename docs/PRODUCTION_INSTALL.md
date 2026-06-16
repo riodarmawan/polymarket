@@ -45,6 +45,12 @@ cargo build --release
 ./deploy/check-production.sh
 ```
 
+Verify a backup before restore:
+
+```bash
+(cd polymarket-bot && ./target/release/polymarket-bot verify-database --path /path/to/backup.db)
+```
+
 Open:
 
 ```text
@@ -59,6 +65,8 @@ Runtime characteristics:
 - public market-data proxy: `http://localhost:3000`
 - live order submission: blocked
 
+No wallet or API credentials are required for production-paper.
+
 Stop local services:
 
 ```bash
@@ -72,15 +80,29 @@ Build first, then adjust `User`, `Group`, `WorkingDirectory`, and paths in:
 
 - `deploy/polymarket-gamma.service.example`
 - `deploy/polymarket-dashboard.service.example`
+- `deploy/polymarket-reconcile.service.example`
+- `deploy/polymarket-reconcile.timer.example`
+- `deploy/polymarket-backup.service.example`
+- `deploy/polymarket-backup.timer.example`
+- `deploy/polymarket-trader.service.example`
 
 Install them:
 
 ```bash
 sudo cp deploy/polymarket-gamma.service.example /etc/systemd/system/polymarket-gamma.service
 sudo cp deploy/polymarket-dashboard.service.example /etc/systemd/system/polymarket-dashboard.service
+sudo cp deploy/polymarket-reconcile.service.example /etc/systemd/system/polymarket-reconcile.service
+sudo cp deploy/polymarket-reconcile.timer.example /etc/systemd/system/polymarket-reconcile.timer
+sudo cp deploy/polymarket-backup.service.example /etc/systemd/system/polymarket-backup.service
+sudo cp deploy/polymarket-backup.timer.example /etc/systemd/system/polymarket-backup.timer
+sudo cp deploy/polymarket-trader.service.example /etc/systemd/system/polymarket-trader.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now polymarket-gamma polymarket-dashboard
+sudo systemctl enable --now polymarket-reconcile.timer polymarket-backup.timer
 ```
+
+Do not enable `polymarket-trader.service` until all live canary acceptance
+criteria pass. Its stop hook attempts authenticated cancel-all.
 
 Check:
 
@@ -94,3 +116,13 @@ curl --fail http://localhost:3001/api/health
 Do not add wallet credentials merely to run production-paper. Live execution
 remains blocked until all phases in `docs/PRODUCTION_IMPLEMENTATION_PLAN.md`
 are complete and `production-check` passes with a completely new wallet.
+
+To prepare a locked, unpopulated secret file for future onboarding:
+
+```bash
+./deploy/init-production-secrets.sh
+./deploy/check-production-secrets.sh
+```
+
+Then follow `docs/WALLET_ONBOARDING.md`. The scripts do not generate private
+keys and keep live trading disabled.

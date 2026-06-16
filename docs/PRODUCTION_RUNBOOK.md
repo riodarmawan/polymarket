@@ -2,8 +2,10 @@
 
 ## Current Status
 
-The dashboard is production-observable but execution remains paper-only. This is
-intentional. No live order code may be enabled until every gate below passes.
+The supervised dashboard remains paper-only. Live FOK submission code exists
+only behind explicit CLI confirmations, one-time authorization, promotion,
+preflight, and reconciliation gates. Do not invoke it until every gate below
+passes.
 
 Implementation sequence, architecture changes, and acceptance criteria are
 defined in [PRODUCTION_IMPLEMENTATION_PLAN.md](PRODUCTION_IMPLEMENTATION_PLAN.md).
@@ -11,6 +13,17 @@ defined in [PRODUCTION_IMPLEMENTATION_PLAN.md](PRODUCTION_IMPLEMENTATION_PLAN.md
 The wallet private key, mnemonic, CLOB credentials, and relayer key previously
 shared in chat must be treated as compromised. Never fund or reuse them. Revoke
 the associated API keys and create a new signer.
+
+Before every commit, release, or canary review, run:
+
+```bash
+./deploy/scan-repo-secrets.sh
+```
+
+This scans tracked and untracked repository files for private keys, mnemonics,
+CLOB secrets, passphrases, and relayer keys. It is separate from
+`check-production-secrets.sh`, which validates the locked local secret file
+permissions outside Git.
 
 Polymarket production uses CLOB V2 as of April 28, 2026. New API integrations
 should use a deposit wallet with signature type `3` (`POLY_1271`) and pUSD
@@ -63,12 +76,119 @@ POLYMARKET_CONFIG=/absolute/path/to/config/production.toml \
   ./target/release/polymarket-bot production-readiness
 ```
 
-This report must continue to show live execution as `BLOCKED` until every
-implementation phase is complete.
+For CI/operator tooling, use the JSON form:
+
+```bash
+POLYMARKET_CONFIG=/absolute/path/to/config/production.toml \
+  ./target/release/polymarket-bot production-readiness --json
+```
+
+For an actual canary promotion gate, require a non-zero exit when any required
+gate is still blocked:
+
+```bash
+POLYMARKET_CONFIG=/absolute/path/to/config/production.toml \
+  ./target/release/polymarket-bot production-readiness --json --require-canary-ready
+```
+
+This report reads the production database, forward-test metrics, runtime state,
+open incidents, reconciliation status, live switch, and build provenance. It
+must continue to show live execution as `BLOCKED` until every implementation
+phase and external acceptance gate is complete.
+
+`deploy/check-production.sh` runs the non-failing inspection by default. Set
+`REQUIRE_CANARY_READY=true` only when intentionally checking whether the host is
+allowed to proceed to a reviewed canary.
+
+Run the full non-live production-paper drill after deployment changes:
+
+```bash
+./deploy/drill-production-paper.sh
+```
+
+The drill runs the repository secret scan, health/readiness inspection, one
+forward monitor pass, backup plus database integrity verification, and confirms
+the canary gate is still blocked. It does not need wallet credentials and does
+not submit orders. By default it writes a JSON summary under
+`polymarket-bot/data-production/drills/`; set `DRILL_SUMMARY=/path/file.json`
+to choose another artifact path.
+
+Run the non-live restore drill after backup/restore or database changes:
+
+```bash
+./deploy/drill-restore.sh
+```
+
+This creates a fresh backup, restores it into a temporary database through
+`restore-production-backup.sh` dry-run mode, verifies integrity, and writes a
+`drill_type=restore` summary artifact. Production readiness reads these drill
+artifacts and keeps Phase 8 blocked until `production-paper`, `restore`,
+`rollback`, `credential-rotation`, `alerts`, and `reboot` drills have all passed.
+
+Run the non-live rollback drill after changing restore, deployment, or database
+backup behavior:
+
+```bash
+./deploy/drill-rollback.sh
+```
+
+This creates a known-good backup, mutates only a temporary database, restores it
+through the dry-run restore path, checks that the restored checksum matches the
+known-good backup, verifies SQLite integrity, and writes a `drill_type=rollback`
+summary artifact.
+
+Run the non-live alerts/check drill after changing deployment checks or health
+reporting:
+
+```bash
+./deploy/drill-alerts.sh
+```
+
+This proves the deployment check passes against the healthy local dashboard and
+fails closed against an unreachable health endpoint, then writes a
+`drill_type=alerts` summary artifact.
+
+Run the non-live credential rotation drill after changing secret handling:
+
+```bash
+./deploy/drill-credential-rotation.sh
+```
+
+This uses only placeholder template values in a temporary directory, verifies
+`700` directory and `600` file permissions, rotates the placeholder file without
+overwriting it, confirms the new file still keeps live trading disabled, and
+writes a `drill_type=credential-rotation` summary artifact.
+
+Run the reboot drill only on the intended production host:
+
+```bash
+./deploy/prepare-reboot-drill.sh
+sudo reboot
+./deploy/run-production-paper.sh
+./deploy/complete-reboot-drill.sh
+```
+
+The completion script compares Linux boot IDs before and after reboot, runs the
+production check, and writes a `drill_type=reboot` artifact only if the host
+actually rebooted and the dashboard is healthy again.
+
+Before issuing any canary authorization, generate a redacted operator review
+packet for the exact durable execution intent:
+
+```bash
+POLYMARKET_CONFIG=/absolute/path/to/config/production.toml \
+  ./target/release/polymarket-bot canary-review --client-key <client_key>
+```
+
+The packet includes the intent, active strategy manifest, readiness evidence,
+intent checks, and the next manual commands. It does not issue an authorization,
+does not sign an order, and does not submit anything. `review_ready` must be
+`true` before the operator may proceed to `authorize-canary`.
 
 Run from the deployment host:
 
 ```bash
+./deploy/scan-repo-secrets.sh
 set -a
 source /secure/path/polymarket-production.env
 set +a
@@ -111,6 +231,65 @@ Do not bypass a failed geoblock check or use a VPN to evade restrictions.
 7. Cancel-all and heartbeat failure behavior tested.
 8. First live order requires a manual one-time canary command.
 
+## Forward-Test Evaluation
+
+Every actionable 5m/15m signal is recorded once per market window with its real
+CLOB executable quote, spread, fee rate, central-risk decision, and eventual
+official Polymarket outcome. Rejected and unfilled opportunities remain in the
+report so promotion metrics cannot ignore them.
+
+CLI report:
+
+```bash
+POLYMARKET_CONFIG=/absolute/path/to/config/production.toml \
+  ./target/release/polymarket-bot forward-report
+```
+
+Forward quality monitor:
+
+```bash
+POLYMARKET_CONFIG=/absolute/path/to/config/production.toml \
+  ./target/release/polymarket-bot monitor-forward --max-iterations 1
+```
+
+The monitor records an audit event on every run. It remains in `collecting`
+until all promotion gates pass, prints `promotion_ready` only after the forward
+sample clears the required thresholds, and fails closed by setting runtime
+state to `halted` plus opening `forward-monitor-halt` if settlement mismatches
+or a drawdown breach are detected.
+
+For production-paper hosts, install
+`deploy/polymarket-forward-monitor.service.example` and
+`deploy/polymarket-forward-monitor.timer.example` as systemd units so this
+check runs every five minutes.
+
+Dashboard API:
+
+```text
+GET /api/forward-report
+```
+
+The report includes daily and rolling metrics, raw direction accuracy,
+executable trade accuracy, fill ratio, PnL, profit factor, drawdown, Brier
+score, settlement mismatch rate, rejection reasons, and segmentation by
+timeframe, UTC date/hour, ask, spread, and strategy regime. `promotion_ready`
+must remain false until every stated gate passes.
+
+## Build Provenance
+
+Every startup and `production-readiness` run prints the package version, git
+revision, dirty flag, and build timestamp. A canary/live runtime must be built
+from a known clean git revision. Dirty builds are allowed only for explicit
+development-only drills and are never acceptable for production promotion.
+
+Strategy parameters are exported separately so an operator can verify which
+model thresholds are attached to a forward-test report or canary review:
+
+```bash
+POLYMARKET_CONFIG=/absolute/path/to/config/production.toml \
+  ./target/release/polymarket-bot strategy-manifest
+```
+
 ## Live Execution Requirements
 
 The live executor must implement all of these before it can be considered ready:
@@ -126,6 +305,52 @@ The live executor must implement all of these before it can be considered ready:
 - Redeem winning positions after resolution.
 - Structured audit log without secrets.
 
+## Production Control Commands
+
+All commands below are fail-closed. `dry-sign`, `reconcile`, status, incidents,
+and backup never submit an order.
+
+```bash
+./target/release/polymarket-bot operational-status
+./target/release/polymarket-bot backup
+./target/release/polymarket-bot verify-database --path /path/to/backup.db
+./target/release/polymarket-bot dry-sign --token-id TOKEN --price 0.50 --size 5
+./target/release/polymarket-bot reconcile
+```
+
+Canary authorization and submission remain unusable until every promotion gate,
+the latest remote reconciliation, production preflight, and operator review
+pass:
+
+```bash
+./target/release/polymarket-bot authorize-canary \
+  --client-key EXPECTED_CLIENT_KEY \
+  --max-usd 0.10 \
+  --confirm AUTHORIZE_ONE_LIVE_CANARY
+
+./target/release/polymarket-bot submit-canary \
+  --authorization-id AUTHORIZATION_ID \
+  --client-key EXPECTED_CLIENT_KEY \
+  --confirm SUBMIT_AUTHORIZED_CANARY
+```
+
+Emergency and lifecycle commands:
+
+```bash
+./target/release/polymarket-bot monitor-user-stream
+./target/release/polymarket-bot plan-redemptions
+./target/release/polymarket-bot incidents
+./target/release/polymarket-bot cancel-all-live --confirm CANCEL_ALL_OPEN_ORDERS
+```
+
+After any canary attempt, the runtime returns to `HALTED`; reconcile and review
+the incident/order history before doing anything else.
+
+`plan-redemptions` only inventories redeemable positions and persists a durable
+plan. It does not submit a redemption transaction. POLY_1271 deposit-wallet
+redemption must go through an operator-reviewed Relayer V2 batch until that
+path has its own signed drill and recovery tests.
+
 ## Deployment
 
 - Run the Gamma proxy and dashboard as separate supervised services.
@@ -138,6 +363,9 @@ The live executor must implement all of these before it can be considered ready:
 - Persist trade/audit state on durable storage.
 - Alert on process exit, heartbeat failure, geoblock change, repeated API
   errors, and daily-loss stop.
+- Install the example trader, reconciliation, and backup services/timers after
+  replacing paths and the service account. Keep the trader disabled until all
+  canary gates pass.
 
 ## Rollback
 
@@ -145,7 +373,8 @@ The live executor must implement all of these before it can be considered ready:
 2. Cancel all open orders.
 3. Stop the trading service.
 4. Reconcile CLOB positions and balances.
-5. Redeem or manually close remaining positions.
+5. Run `plan-redemptions`, then redeem or manually close remaining positions
+   through an operator-reviewed Relayer V2 batch.
 6. Rotate credentials if compromise is suspected.
 
 ## Official References

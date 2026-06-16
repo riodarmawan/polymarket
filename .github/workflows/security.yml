@@ -1,0 +1,29 @@
+name: Security and SBOM
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash deploy/scan-repo-secrets.sh --self-test
+      - run: bash deploy/scan-repo-secrets.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-audit cargo-cyclonedx
+      - run: cargo audit
+      - run: cargo cyclonedx --format json
+      - run: cargo audit
+        working-directory: polymarket-bot
+      - run: cargo cyclonedx --format json
+        working-directory: polymarket-bot
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cyclonedx-sbom
+          path: |
+            *.cdx.json
+            polymarket-bot/*.cdx.json

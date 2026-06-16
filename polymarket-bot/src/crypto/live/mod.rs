@@ -1,16 +1,16 @@
+pub mod gamma_client;
 pub mod paper_trading;
 pub mod tui;
-pub mod gamma_client;
 
-use paper_trading::{PaperTradingConfig, PaperTradingEngine};
-use tui::TuiRenderer;
-use gamma_client::GammaClient;
 use crate::crypto::binance_ws::{BinanceWsClient, Candle};
 use crate::crypto::indicators::Timeframe;
 use crate::crypto::signals::SignalEngine;
+use anyhow::Result;
+use gamma_client::GammaClient;
+use paper_trading::{PaperTradingConfig, PaperTradingEngine};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use anyhow::Result;
+use tui::TuiRenderer;
 
 pub struct LiveDashboard {
     config: PaperTradingConfig,
@@ -34,16 +34,20 @@ impl LiveDashboard {
         let gamma_client = GammaClient::new("http://localhost:3000");
 
         // Fetch initial market data
-        let markets = gamma_client.discover_crypto_markets().await.unwrap_or_default();
-        let market_infos: Vec<tui::MarketInfo> = markets.iter().map(|m| {
-            tui::MarketInfo {
+        let markets = gamma_client
+            .discover_crypto_markets()
+            .await
+            .unwrap_or_default();
+        let market_infos: Vec<tui::MarketInfo> = markets
+            .iter()
+            .map(|m| tui::MarketInfo {
                 id: m.id.clone(),
                 question: m.question.clone(),
                 yes_price: m.yes_price(),
                 no_price: m.no_price(),
                 volume: m.volume_usd(),
-            }
-        }).collect();
+            })
+            .collect();
         tui.update_markets(market_infos);
 
         // Try to start WebSocket, fallback to mock data
@@ -66,21 +70,23 @@ impl LiveDashboard {
         let mut mock_candle_count = 0u32;
         let mut mock_last_ts = chrono::Utc::now().timestamp_millis();
 
-        let result = self.run_loop(
-            &mut terminal,
-            &mut rx,
-            &signal_engine,
-            &mut paper_engine,
-            &mut tui,
-            &mut candle_buffer,
-            &mut last_m15_close,
-            start_time,
-            &gamma_client,
-            ws_ok,
-            &mut mock_price,
-            &mut mock_candle_count,
-            &mut mock_last_ts,
-        ).await;
+        let result = self
+            .run_loop(
+                &mut terminal,
+                &mut rx,
+                &signal_engine,
+                &mut paper_engine,
+                &mut tui,
+                &mut candle_buffer,
+                &mut last_m15_close,
+                start_time,
+                &gamma_client,
+                ws_ok,
+                &mut mock_price,
+                &mut mock_candle_count,
+                &mut mock_last_ts,
+            )
+            .await;
 
         crossterm::terminal::disable_raw_mode()?;
         crossterm::execute!(
@@ -117,7 +123,9 @@ impl LiveDashboard {
             if crossterm::event::poll(Duration::from_millis(100))? {
                 if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
                     if key.code == crossterm::event::KeyCode::Char('c')
-                        && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                        && key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
                     {
                         break;
                     }
@@ -131,15 +139,16 @@ impl LiveDashboard {
             if market_refresh_counter >= 600 {
                 market_refresh_counter = 0;
                 if let Ok(markets) = gamma_client.discover_crypto_markets().await {
-                    let market_infos: Vec<tui::MarketInfo> = markets.iter().map(|m| {
-                        tui::MarketInfo {
+                    let market_infos: Vec<tui::MarketInfo> = markets
+                        .iter()
+                        .map(|m| tui::MarketInfo {
                             id: m.id.clone(),
                             question: m.question.clone(),
                             yes_price: m.yes_price(),
                             no_price: m.no_price(),
                             volume: m.volume_usd(),
-                        }
-                    }).collect();
+                        })
+                        .collect();
                     tui.update_markets(market_infos);
                 }
             }
@@ -204,9 +213,12 @@ impl LiveDashboard {
                 let signals = signal_engine.generate_signals(&candle_map);
 
                 if let Some(signal) = signals.first() {
-                    tui.update_signal(
-                        Some(format!("{} {} (conf: {:.2})", signal.timeframe.as_str(), signal.direction, signal.confidence)),
-                    );
+                    tui.update_signal(Some(format!(
+                        "{} {} (conf: {:.2})",
+                        signal.timeframe.as_str(),
+                        signal.direction,
+                        signal.confidence
+                    )));
 
                     paper_engine.execute_signal(
                         signal.direction.clone(),
