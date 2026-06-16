@@ -552,36 +552,38 @@ fn drill_summary_passes(drill_type: &str, summary: &Value) -> bool {
     if !ok {
         return false;
     }
-    if drill_type != "production-paper" {
-        return true;
+    match drill_type {
+        "production-paper" => {
+            let submitted = summary
+                .get("submitted")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let live_credentials_required = summary
+                .get("live_credentials_required")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let canary_gate_blocked = summary
+                .get("canary_gate_blocked")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let health_ready = summary
+                .pointer("/health/overall")
+                .and_then(Value::as_str)
+                .is_some_and(|overall| overall == "ready");
+            let backup_verified = summary
+                .pointer("/backup_verify/ok")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+
+            !submitted
+                && !live_credentials_required
+                && canary_gate_blocked
+                && health_ready
+                && backup_verified
+        }
+        "reboot" | "restore" | "rollback" | "credential-rotation" | "alerts" => true,
+        _ => false,
     }
-
-    let submitted = summary
-        .get("submitted")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let live_credentials_required = summary
-        .get("live_credentials_required")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let canary_gate_blocked = summary
-        .get("canary_gate_blocked")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let health_ready = summary
-        .pointer("/health/overall")
-        .and_then(Value::as_str)
-        .is_some_and(|overall| overall == "ready");
-    let backup_verified = summary
-        .pointer("/backup_verify/ok")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    !submitted
-        && !live_credentials_required
-        && canary_gate_blocked
-        && health_ready
-        && backup_verified
 }
 
 fn short_sha(value: &str) -> &str {
@@ -814,6 +816,25 @@ mod tests {
         assert!(!ok);
         assert!(evidence.contains("completed: production-paper"));
         assert!(evidence.contains("missing: reboot, restore, rollback"));
+    }
+
+    #[test]
+    fn deployment_drill_evidence_ignores_non_deployment_drills() {
+        let summary = json!({
+            "drill_type": "lifecycle-non-live",
+            "ok": true,
+            "submitted": false,
+            "live_credentials_required": false,
+            "test_suite_passed": true
+        });
+        let (ok, evidence) = deployment_drill_evidence_from_summaries(
+            &[summary],
+            Path::new("data-production/drills"),
+        );
+
+        assert!(!ok);
+        assert!(evidence.contains("completed: none"));
+        assert!(evidence.contains("missing: production-paper, reboot, restore"));
     }
 
     #[test]
