@@ -297,6 +297,7 @@ async fn main() -> anyhow::Result<()> {
             capital,
             timeframes,
             source_interval,
+            execution_delay_secs,
         } => {
             tracing::info!("Running crypto backtest...");
             tracing::info!("Period: {} days, Capital: ${:.2}", period, capital);
@@ -344,12 +345,15 @@ async fn main() -> anyhow::Result<()> {
                 initial_capital: capital,
                 min_order_usd: 0.50,
                 max_order_usd: 4.00,
+                risk_fraction: config.position_sizing.max_position_pct,
+                min_order_shares: 5.0,
                 fee_pct: 0.10,
                 timeframes,
                 min_entry_price: 0.15,
                 max_entry_price: 0.60,
                 min_edge: 0.10,
                 entry_minute: 3,
+                execution_delay_secs,
                 source_interval_minutes: source_interval,
                 target_start_ts: target_range.map(|range| range.0),
                 target_end_ts: target_range.map(|range| range.1),
@@ -424,12 +428,12 @@ async fn main() -> anyhow::Result<()> {
                         result.diagnostics.brier_score
                     );
                     println!(
-                        "  Conservative max-ask stress trades: {} | accuracy: {:.1}%",
+                        "  Realistic executable stress trades: {} | accuracy: {:.1}%",
                         result.total_trades,
                         result.win_rate * 100.0
                     );
                     println!(
-                        "  WARNING: PnL assumes every signal fills at the configured maximum ask and resolves from Binance."
+                        "  WARNING: PnL uses simulated orderbook odds, execution delay, fee, and minimum-share filters; real CLOB depth can still differ."
                     );
 
                     // Show last 10 trades

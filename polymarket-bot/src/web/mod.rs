@@ -882,6 +882,37 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
         return;
     };
 
+    let (min_price, max_price, min_margin, entry_start, entry_end) = if timeframe == "5m" {
+        (0.05, 0.62, 0.08, 45, 180)
+    } else {
+        (0.15, settings.max_entry_price, settings.min_edge, 190, 600)
+    };
+    let elapsed_secs = chrono::Utc::now().timestamp() - market.start_ts;
+    if elapsed_secs < entry_start {
+        set_timeframe_note(
+            state,
+            timeframe,
+            &format!(
+                "Waiting for entry window: {}s / {}-{}s",
+                elapsed_secs, entry_start, entry_end
+            ),
+        )
+        .await;
+        return;
+    }
+    if elapsed_secs > entry_end {
+        set_timeframe_note(
+            state,
+            timeframe,
+            &format!(
+                "Skip: entry window expired {}s / {}-{}s",
+                elapsed_secs, entry_start, entry_end
+            ),
+        )
+        .await;
+        return;
+    }
+
     let mut trades = state.trades.write().await;
     let mut stats = state.stats.write().await;
     let mut stats_5m = state.stats_5m.write().await;
@@ -892,11 +923,6 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
         .fee_rate_bps
         .map(|bps| size_usd * bps as f64 / 10_000.0)
         .unwrap_or(size_usd * state.runtime.configured_fee_pct);
-    let (min_price, max_price, min_margin, entry_start, entry_end) = if timeframe == "5m" {
-        (0.05, 0.62, 0.08, 45, 180)
-    } else {
-        (0.15, settings.max_entry_price, settings.min_edge, 190, 600)
-    };
     let mut risk_stats = if timeframe == "5m" {
         stats_5m.clone()
     } else {

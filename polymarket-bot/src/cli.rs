@@ -65,16 +65,20 @@ pub enum Commands {
         date: Option<String>,
 
         /// Initial capital in USD
-        #[arg(long, default_value = "2.0")]
+        #[arg(long, default_value = "7.5")]
         capital: f64,
 
         /// Timeframes to trade (comma-separated)
-        #[arg(long, default_value = "15m,1h")]
+        #[arg(long, default_value = "5m,15m")]
         timeframes: String,
 
         /// Source candle interval in minutes (e.g., 15 for 15m candles)
-        #[arg(long, default_value = "15")]
+        #[arg(long, default_value = "1")]
         source_interval: u32,
+
+        /// Simulated delay between signal and executable order attempt
+        #[arg(long, default_value = "30")]
+        execution_delay_secs: u32,
     },
 
     /// Terminal UI dashboard
@@ -87,11 +91,11 @@ pub enum Commands {
     /// Live trading dashboard (paper trading)
     Live {
         /// Initial virtual capital in USD
-        #[arg(long, default_value = "2.0")]
+        #[arg(long, default_value = "7.5")]
         capital: f64,
 
         /// Maximum order size in USD
-        #[arg(long, default_value = "0.50")]
+        #[arg(long, default_value = "4.00")]
         max_order: f64,
     },
 

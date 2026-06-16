@@ -1,7 +1,9 @@
 use crate::crypto::binance_ws::{BinanceRestClient, Candle};
 use crate::crypto::indicators::Timeframe;
 use crate::crypto::signals::Direction;
-use crate::crypto::strategy::{predict_five_minute_continuation, predict_window};
+use crate::crypto::strategy::{
+    estimate_historical_ask, predict_five_minute_continuation, predict_window,
+};
 use std::path::Path;
 
 const CACHE_PATH: &str = "/home/kucingsakti/polymarket/.playwright-mcp/btc_1m_30d.json";
@@ -11,12 +13,15 @@ pub struct CryptoBacktestConfig {
     pub initial_capital: f64,
     pub min_order_usd: f64,
     pub max_order_usd: f64,
+    pub risk_fraction: f64,
+    pub min_order_shares: f64,
     pub fee_pct: f64,
     pub timeframes: Vec<Timeframe>,
     pub min_entry_price: f64,
     pub max_entry_price: f64,
     pub min_edge: f64,
     pub entry_minute: usize,
+    pub execution_delay_secs: u32,
     pub source_interval_minutes: u32,
     pub target_start_ts: Option<i64>,
     pub target_end_ts: Option<i64>,
@@ -28,12 +33,15 @@ impl Default for CryptoBacktestConfig {
             initial_capital: 7.50,
             min_order_usd: 0.50,
             max_order_usd: 4.00,
+            risk_fraction: 0.50,
+            min_order_shares: 5.0,
             fee_pct: 0.10,
             timeframes: vec![Timeframe::M15],
             min_entry_price: 0.15,
             max_entry_price: 0.60,
             min_edge: 0.10,
             entry_minute: 3,
+            execution_delay_secs: 30,
             source_interval_minutes: 1,
             target_start_ts: None,
             target_end_ts: None,
@@ -178,7 +186,9 @@ impl CryptoBacktestEngine {
 
                 let global_start = first_aligned + window_index * window_minutes;
                 let entry_index = global_start + entry_minute - 1;
-                if entry_index < 60 || entry_index >= candles.len() {
+                let delay_minutes = ((config.execution_delay_secs as usize) + 59) / 60;
+                let execution_index = entry_index + delay_minutes;
+                if entry_index < 60 || execution_index >= candles.len() {
                     continue;
                 }
                 let history_start = entry_index.saturating_sub(60);
@@ -196,7 +206,20 @@ impl CryptoBacktestEngine {
                     None => continue,
                 };
 
-                let entry_btc_price = window[entry_minute - 1].close;
+                let execution_elapsed_secs =
+                    (entry_minute as u32 * 60) + config.execution_delay_secs;
+                let (entry_start_secs, entry_end_secs, min_entry_price, max_entry_price, min_edge) =
+                    if *timeframe == Timeframe::M5 {
+                        (45, 180, 0.05, 0.62, 0.08)
+                    } else {
+                        (190, 600, config.min_entry_price, config.max_entry_price, config.min_edge)
+                    };
+                if execution_elapsed_secs < entry_start_secs || execution_elapsed_secs > entry_end_secs
+                {
+                    continue;
+                }
+
+                let entry_btc_price = candles[execution_index].close;
                 let final_btc_price = window[window_minutes - 1].close;
                 let window_went_up = final_btc_price >= window_open;
                 let signal_won = match signal.direction {
@@ -215,18 +238,29 @@ impl CryptoBacktestEngine {
                     second_half_correct += usize::from(signal_won);
                 }
 
-                // Historical candles do not include Polymarket orderbooks. Use
-                // the worst allowed fill for every signal instead of selecting
-                // trades with synthetic odds derived from the same BTC move.
-                let ask = if *timeframe == Timeframe::M5 {
-                    0.62
-                } else {
-                    config.max_entry_price
-                };
+                let execution_history_start = execution_index.saturating_sub(60);
+                let execution_prices: Vec<f64> = candles[execution_history_start..=execution_index]
+                    .iter()
+                    .map(|candle| candle.close)
+                    .collect();
+                let minutes_remaining = window_minutes.saturating_sub(entry_minute + delay_minutes);
+                let ask = estimate_historical_ask(
+                    &signal.direction,
+                    window_open,
+                    entry_btc_price,
+                    &execution_prices,
+                    minutes_remaining,
+                );
                 let edge = signal.confidence - ask;
+                if ask < min_entry_price || ask > max_entry_price {
+                    continue;
+                }
+                if edge < min_edge + config.fee_pct {
+                    continue;
+                }
 
                 candidates.push(CandidateTrade {
-                    timestamp: window[entry_minute - 1].timestamp,
+                    timestamp: candles[execution_index].timestamp,
                     timeframe: *timeframe,
                     direction: signal.direction,
                     entry_price: entry_btc_price,
@@ -263,12 +297,7 @@ impl CryptoBacktestEngine {
             } else {
                 1.0
             };
-            let risk_fraction = if candidate.timeframe == Timeframe::M5 {
-                0.03
-            } else {
-                0.05
-            };
-            let size_usd = (capital * risk_fraction * drawdown_scale)
+            let size_usd = (capital * config.risk_fraction * drawdown_scale)
                 .max(config.min_order_usd)
                 .min(config.max_order_usd)
                 .min(capital);
@@ -278,6 +307,9 @@ impl CryptoBacktestEngine {
 
             let fee = size_usd * config.fee_pct;
             let shares = size_usd / candidate.market_price;
+            if shares < config.min_order_shares {
+                continue;
+            }
             let pnl = if candidate.won {
                 shares - size_usd - fee
             } else {
