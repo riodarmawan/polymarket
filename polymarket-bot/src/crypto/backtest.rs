@@ -5,9 +5,14 @@ use crate::crypto::strategy::{
     estimate_historical_ask, predict_early_window, predict_fifteen_minute_latency_breakout,
     predict_five_minute_continuation,
 };
+use crate::engine::microstructure::{
+    estimate_probability, executable_quote, timing_for, ProbabilityInput, QuoteDecision, QuoteInput,
+};
+use crate::engine::risk::Direction as RiskDirection;
 use std::path::Path;
 
 const CACHE_PATH: &str = "/home/kucingsakti/polymarket/.playwright-mcp/btc_1m_30d.json";
+const MAKER_TIME_IN_FORCE_MS: u64 = 1_500;
 
 #[derive(Debug, Clone)]
 pub struct CryptoBacktestConfig {
@@ -182,12 +187,13 @@ impl CryptoBacktestEngine {
                 let global_start = first_aligned + window_index * window_minutes;
                 let delay_minutes = ((config.execution_delay_secs as usize) + 59) / 60;
                 let entry_minutes: Vec<usize> = if *timeframe == Timeframe::M5 {
-                    vec![1]
+                    vec![1, 2]
                 } else {
                     vec![
                         1,
                         2,
                         config.entry_minute.min(window_minutes.saturating_sub(1)),
+                        7.min(window_minutes.saturating_sub(1)),
                     ]
                 };
                 let mut selected = None;
@@ -217,28 +223,20 @@ impl CryptoBacktestEngine {
 
                     let execution_elapsed_secs =
                         (entry_minute as u32 * 60) + config.execution_delay_secs;
-                    let (
-                        entry_start_secs,
-                        entry_end_secs,
-                        min_entry_price,
-                        max_entry_price,
-                        min_edge,
-                    ) = if *timeframe == Timeframe::M5 {
-                        (45, 180, 0.05, 0.62, 0.08)
-                    } else {
-                        (
-                            75,
-                            600,
-                            config.min_entry_price,
-                            config.max_entry_price,
-                            config.min_edge,
-                        )
-                    };
-                    if execution_elapsed_secs < entry_start_secs
-                        || execution_elapsed_secs > entry_end_secs
-                    {
+                    let timing = timing_for(timeframe.as_str(), execution_elapsed_secs as i64);
+                    if timing.reason_code != "entry_open" {
                         continue;
                     }
+                    let (min_entry_price, max_entry_price, min_edge) =
+                        if *timeframe == Timeframe::M5 {
+                            (0.05, 0.62, 0.08)
+                        } else {
+                            (
+                                config.min_entry_price,
+                                config.max_entry_price,
+                                config.min_edge,
+                            )
+                        };
 
                     let entry_btc_price = candles[execution_index].close;
                     let final_btc_price = window[window_minutes - 1].close;
@@ -267,15 +265,71 @@ impl CryptoBacktestEngine {
                         .collect();
                     let minutes_remaining =
                         window_minutes.saturating_sub(entry_minute + delay_minutes);
-                    let ask = estimate_historical_ask(
-                        &signal.direction,
+                    let up_ask = estimate_historical_ask(
+                        &Direction::Up,
                         window_open,
                         entry_btc_price,
                         &execution_prices,
                         minutes_remaining,
                     );
-                    let edge = signal.confidence - ask;
-                    if ask < min_entry_price || ask > max_entry_price {
+                    let down_ask = estimate_historical_ask(
+                        &Direction::Down,
+                        window_open,
+                        entry_btc_price,
+                        &execution_prices,
+                        minutes_remaining,
+                    );
+                    let probability = microstructure_probability(
+                        &signal.direction,
+                        signal.confidence,
+                        window_open,
+                        entry_btc_price,
+                        &execution_prices,
+                        minutes_remaining,
+                        (config.execution_delay_secs * 1_000) as i64,
+                        up_ask,
+                        down_ask,
+                    );
+                    let risk_direction = risk_direction(&signal.direction);
+                    let quote_decision = executable_quote(QuoteInput {
+                        direction: risk_direction,
+                        probability_up: probability.adjusted_probability_up,
+                        up_quote: Some(crate::crypto::live::gamma_client::BuyQuote {
+                            average_price: up_ask,
+                            shares: config.max_order_usd / up_ask,
+                            available_depth_usd: config.max_order_usd * 2.0,
+                        }),
+                        down_quote: Some(crate::crypto::live::gamma_client::BuyQuote {
+                            average_price: down_ask,
+                            shares: config.max_order_usd / down_ask,
+                            available_depth_usd: config.max_order_usd * 2.0,
+                        }),
+                        up_best_bid: Some((up_ask - 0.02).max(0.01)),
+                        down_best_bid: Some((down_ask - 0.02).max(0.01)),
+                        min_edge,
+                        requested_usd: config.max_order_usd.min(config.initial_capital),
+                        tick_size: 0.01,
+                        timing,
+                        maker_time_in_force_ms: MAKER_TIME_IN_FORCE_MS,
+                    });
+                    let (fill_price, edge) = match quote_decision {
+                        QuoteDecision::Taker { price, edge, .. } => (price, edge),
+                        QuoteDecision::Maker {
+                            bid_price, edge, ..
+                        } if maker_would_fill(
+                            signal.direction,
+                            bid_price,
+                            window_open,
+                            window,
+                            entry_minute,
+                            &execution_prices,
+                        ) =>
+                        {
+                            (bid_price, edge)
+                        }
+                        _ => continue,
+                    };
+                    if fill_price < min_entry_price || fill_price > max_entry_price {
                         continue;
                     }
                     if edge < min_edge + config.fee_pct {
@@ -288,9 +342,12 @@ impl CryptoBacktestEngine {
                         direction: signal.direction,
                         entry_price: entry_btc_price,
                         exit_price: final_btc_price,
-                        market_price: ask,
+                        market_price: fill_price,
                         won: signal_won,
-                        confidence: signal.confidence,
+                        confidence: match signal.direction {
+                            Direction::Up => probability.adjusted_probability_up,
+                            Direction::Down => 1.0 - probability.adjusted_probability_up,
+                        },
                         edge,
                     });
                     break;
@@ -490,4 +547,83 @@ impl Default for CryptoBacktestEngine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn risk_direction(direction: &Direction) -> RiskDirection {
+    match direction {
+        Direction::Up => RiskDirection::Up,
+        Direction::Down => RiskDirection::Down,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn microstructure_probability(
+    direction: &Direction,
+    confidence: f64,
+    window_open: f64,
+    current_price: f64,
+    execution_prices: &[f64],
+    minutes_remaining: usize,
+    latency_ms: i64,
+    up_ask: f64,
+    down_ask: f64,
+) -> crate::engine::microstructure::ProbabilityEstimate {
+    let returns: Vec<f64> = execution_prices
+        .windows(2)
+        .filter_map(|window| (window[0] > 0.0).then_some((window[1] - window[0]) / window[0]))
+        .collect();
+    let realized_vol_return = if returns.is_empty() {
+        0.000_5
+    } else {
+        let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+        (returns
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / returns.len() as f64)
+            .sqrt()
+            .max(0.000_1)
+    };
+    let side = match direction {
+        Direction::Up => 1.0,
+        Direction::Down => -1.0,
+    };
+    let momentum = ((confidence - 0.5) * 0.10 * side).clamp(-0.03, 0.03);
+    let up_depth = (1.0 - up_ask).max(0.01);
+    let down_depth = (1.0 - down_ask).max(0.01);
+    let book_imbalance = (up_depth - down_depth) / (up_depth + down_depth);
+    let tau_seconds = (minutes_remaining.max(1) * 60) as f64;
+    estimate_probability(ProbabilityInput {
+        current_price,
+        price_to_beat: window_open,
+        drift_per_second: momentum * current_price / tau_seconds,
+        realized_vol_per_sqrt_second: current_price * realized_vol_return.max(0.000_25),
+        tau_seconds,
+        momentum,
+        book_imbalance,
+        spread: (up_ask + down_ask - 1.0).abs(),
+        latency_ms,
+    })
+}
+
+fn maker_would_fill(
+    direction: Direction,
+    bid_price: f64,
+    window_open: f64,
+    window: &[Candle],
+    entry_minute: usize,
+    execution_prices: &[f64],
+) -> bool {
+    let fill_window = (entry_minute..(entry_minute + 2).min(window.len())).map(|index| {
+        estimate_historical_ask(
+            &direction,
+            window_open,
+            window[index].close,
+            execution_prices,
+            window.len().saturating_sub(index),
+        )
+    });
+    fill_window
+        .into_iter()
+        .any(|future_ask| future_ask <= bid_price)
 }

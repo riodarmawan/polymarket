@@ -10,7 +10,7 @@ pub struct Signal {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Direction {
     Up,
     Down,
