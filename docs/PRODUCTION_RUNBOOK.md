@@ -200,6 +200,20 @@ not complete Phase 5 by itself; Phase 5 still requires a redacted
 `drill_type=new-wallet-dry-sign` artifact produced on the production host with a
 new uncompromised wallet, POLY_1271 signature type `3`, and `submitted=false`.
 
+Run the non-live reconciliation safety drill after changing reconciliation,
+secret loading, or incident handling:
+
+```bash
+./deploy/drill-reconciliation-safety.sh
+```
+
+This runs `reconcile` without wallet/CLOB credentials against a temporary
+database and passes only if the command fails closed, leaves runtime halted, and
+opens an incident in that temporary database. It writes
+`drill_type=reconciliation-safety`. This does not complete Phase 7; Phase 7
+still requires a fresh authenticated reconciliation against the real production
+database after wallet onboarding.
+
 Before issuing any canary authorization, generate a redacted operator review
 packet for the exact durable execution intent:
 

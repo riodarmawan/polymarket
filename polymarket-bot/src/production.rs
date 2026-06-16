@@ -144,6 +144,7 @@ pub async fn build_readiness_report(config: &Config) -> ProductionReadinessRepor
         .unwrap_or_else(|| store_evidence.clone());
     let signer_drills = signer_drill_evidence(config);
     let lifecycle_drills = lifecycle_drill_evidence(config);
+    let reconciliation_drills = reconciliation_drill_evidence(config);
     let deployment_drills = deployment_drill_evidence(config);
 
     let checks = vec![
@@ -245,9 +246,12 @@ pub async fn build_readiness_report(config: &Config) -> ProductionReadinessRepor
         readiness_check(
             "Phase 7",
             "fresh authenticated reconciliation is ready",
-            reconciliation_ready.unwrap_or(false),
+            reconciliation_ready.unwrap_or(false) && reconciliation_drills.0,
             true,
-            format!("latest_reconciliation_ready={reconciliation_evidence}"),
+            format!(
+                "latest_reconciliation_ready={reconciliation_evidence}; {}",
+                reconciliation_drills.1
+            ),
         ),
         readiness_check(
             "Phase 7",
@@ -458,6 +462,73 @@ fn signer_drill_summary_passes(drill_type: &str, summary: &Value) -> bool {
         }
         _ => false,
     }
+}
+
+fn reconciliation_drill_evidence(config: &Config) -> (bool, String) {
+    let drill_dir = drill_summary_dir(config);
+    let summaries = load_deployment_drill_summaries(&drill_dir);
+    reconciliation_drill_evidence_from_summaries(&summaries, &drill_dir)
+}
+
+fn reconciliation_drill_evidence_from_summaries(
+    summaries: &[Value],
+    drill_dir: &Path,
+) -> (bool, String) {
+    let completed = summaries.iter().any(|summary| {
+        summary
+            .get("drill_type")
+            .and_then(Value::as_str)
+            .is_some_and(|drill_type| drill_type == "reconciliation-safety")
+            && reconciliation_drill_summary_passes(summary)
+    });
+
+    if completed {
+        (
+            true,
+            format!(
+                "completed: reconciliation-safety; source={}",
+                drill_dir.display()
+            ),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "completed: none; missing: reconciliation-safety; source={}",
+                drill_dir.display()
+            ),
+        )
+    }
+}
+
+fn reconciliation_drill_summary_passes(summary: &Value) -> bool {
+    let ok = summary.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let submitted = summary
+        .get("submitted")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let live_credentials_required = summary
+        .get("live_credentials_required")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let failed_closed_without_credentials = summary
+        .get("failed_closed_without_credentials")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let runtime_halted = summary
+        .get("runtime_halted_after_failure")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let incident_opened = summary
+        .get("incident_opened_after_failure")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    ok && !submitted
+        && !live_credentials_required
+        && failed_closed_without_credentials
+        && runtime_halted
+        && incident_opened
 }
 
 fn lifecycle_drill_evidence(config: &Config) -> (bool, String) {
@@ -968,6 +1039,46 @@ mod tests {
 
         assert!(ok);
         assert!(evidence.contains("completed: dry-sign-safety, new-wallet-dry-sign"));
+    }
+
+    #[test]
+    fn reconciliation_drill_evidence_requires_fail_closed_safety_artifact() {
+        let summary = json!({
+            "drill_type": "reconciliation-safety",
+            "ok": true,
+            "submitted": false,
+            "live_credentials_required": false,
+            "failed_closed_without_credentials": true,
+            "runtime_halted_after_failure": true,
+            "incident_opened_after_failure": true
+        });
+        let (ok, evidence) = reconciliation_drill_evidence_from_summaries(
+            &[summary],
+            Path::new("data-production/drills"),
+        );
+
+        assert!(ok);
+        assert!(evidence.contains("completed: reconciliation-safety"));
+    }
+
+    #[test]
+    fn reconciliation_drill_evidence_rejects_weak_artifacts() {
+        let summary = json!({
+            "drill_type": "reconciliation-safety",
+            "ok": true,
+            "submitted": false,
+            "live_credentials_required": false,
+            "failed_closed_without_credentials": true,
+            "runtime_halted_after_failure": true,
+            "incident_opened_after_failure": false
+        });
+        let (ok, evidence) = reconciliation_drill_evidence_from_summaries(
+            &[summary],
+            Path::new("data-production/drills"),
+        );
+
+        assert!(!ok);
+        assert!(evidence.contains("missing: reconciliation-safety"));
     }
 
     #[test]
