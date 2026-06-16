@@ -142,6 +142,7 @@ pub async fn build_readiness_report(config: &Config) -> ProductionReadinessRepor
     let reconciliation_evidence = reconciliation_ready
         .map(|ready| ready.to_string())
         .unwrap_or_else(|| store_evidence.clone());
+    let lifecycle_drills = lifecycle_drill_evidence(config);
     let deployment_drills = deployment_drill_evidence(config);
 
     let checks = vec![
@@ -229,9 +230,9 @@ pub async fn build_readiness_report(config: &Config) -> ProductionReadinessRepor
         readiness_check(
             "Phase 6",
             "live order lifecycle drills are complete",
-            false,
+            lifecycle_drills.0,
             true,
-            "requires lifecycle drills including heartbeat/cancel/redeem".to_string(),
+            lifecycle_drills.1,
         ),
         readiness_check(
             "Phase 7",
@@ -366,6 +367,88 @@ fn canary_gate_error(report: &ProductionReadinessReport) -> Option<String> {
             report.blockers.len()
         )
     })
+}
+
+fn lifecycle_drill_evidence(config: &Config) -> (bool, String) {
+    let drill_dir = drill_summary_dir(config);
+    let summaries = load_deployment_drill_summaries(&drill_dir);
+    lifecycle_drill_evidence_from_summaries(&summaries, &drill_dir)
+}
+
+fn lifecycle_drill_evidence_from_summaries(
+    summaries: &[Value],
+    drill_dir: &Path,
+) -> (bool, String) {
+    const REQUIRED_DRILLS: [&str; 2] = ["lifecycle-non-live", "lifecycle-live-canary"];
+
+    let mut completed = BTreeSet::new();
+    for summary in summaries {
+        let Some(drill_type) = summary.get("drill_type").and_then(Value::as_str) else {
+            continue;
+        };
+        if lifecycle_drill_summary_passes(drill_type, summary) {
+            completed.insert(drill_type.to_string());
+        }
+    }
+
+    let missing: Vec<&str> = REQUIRED_DRILLS
+        .into_iter()
+        .filter(|drill| !completed.contains(*drill))
+        .collect();
+
+    let completed_text = if completed.is_empty() {
+        "none".to_string()
+    } else {
+        completed.into_iter().collect::<Vec<_>>().join(", ")
+    };
+
+    if missing.is_empty() {
+        (
+            true,
+            format!(
+                "completed: {completed_text}; source={}",
+                drill_dir.display()
+            ),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "completed: {completed_text}; missing: {}; source={}",
+                missing.join(", "),
+                drill_dir.display()
+            ),
+        )
+    }
+}
+
+fn lifecycle_drill_summary_passes(drill_type: &str, summary: &Value) -> bool {
+    let ok = summary.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    if !ok {
+        return false;
+    }
+    match drill_type {
+        "lifecycle-non-live" => {
+            let submitted = summary
+                .get("submitted")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let live_credentials_required = summary
+                .get("live_credentials_required")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let test_suite_passed = summary
+                .get("test_suite_passed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            !submitted && !live_credentials_required && test_suite_passed
+        }
+        "lifecycle-live-canary" => summary
+            .get("submitted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 fn deployment_drill_evidence(config: &Config) -> (bool, String) {
@@ -760,5 +843,49 @@ mod tests {
         assert!(ok);
         assert!(evidence.contains("completed:"));
         assert!(!evidence.contains("missing:"));
+    }
+
+    #[test]
+    fn lifecycle_drill_evidence_keeps_live_gate_blocked_after_non_live_drill() {
+        let summary = json!({
+            "drill_type": "lifecycle-non-live",
+            "ok": true,
+            "submitted": false,
+            "live_credentials_required": false,
+            "test_suite_passed": true
+        });
+        let (ok, evidence) = lifecycle_drill_evidence_from_summaries(
+            &[summary],
+            Path::new("data-production/drills"),
+        );
+
+        assert!(!ok);
+        assert!(evidence.contains("completed: lifecycle-non-live"));
+        assert!(evidence.contains("missing: lifecycle-live-canary"));
+    }
+
+    #[test]
+    fn lifecycle_drill_evidence_passes_only_after_non_live_and_live_canary_drills() {
+        let summaries = vec![
+            json!({
+                "drill_type": "lifecycle-non-live",
+                "ok": true,
+                "submitted": false,
+                "live_credentials_required": false,
+                "test_suite_passed": true
+            }),
+            json!({
+                "drill_type": "lifecycle-live-canary",
+                "ok": true,
+                "submitted": true
+            }),
+        ];
+        let (ok, evidence) = lifecycle_drill_evidence_from_summaries(
+            &summaries,
+            Path::new("data-production/drills"),
+        );
+
+        assert!(ok);
+        assert!(evidence.contains("completed: lifecycle-live-canary, lifecycle-non-live"));
     }
 }

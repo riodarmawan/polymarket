@@ -172,6 +172,20 @@ The completion script compares Linux boot IDs before and after reboot, runs the
 production check, and writes a `drill_type=reboot` artifact only if the host
 actually rebooted and the dashboard is healthy again.
 
+Run the non-live lifecycle drill after changing execution, recovery,
+reconciliation, or redemption code:
+
+```bash
+./deploy/drill-lifecycle.sh
+```
+
+This runs the lifecycle, live-executor fail-closed, recovery, user-stream, and
+redemption-planning tests, then writes a `drill_type=lifecycle-non-live`
+artifact. This is necessary evidence, but it does not complete Phase 6 by
+itself; Phase 6 still requires a reviewed `lifecycle-live-canary` artifact after
+wallet onboarding, dry-sign validation, reconciliation, and explicit operator
+authorization.
+
 Before issuing any canary authorization, generate a redacted operator review
 packet for the exact durable execution intent:
 
