@@ -148,6 +148,11 @@ impl RiskEngine {
         let fill = request.expected_fill_price;
         let elapsed_secs = request.now_ms / 1_000 - request.market_start_ts;
         let margin = fill.map(|price| request.confidence - price);
+        let fee_margin = request
+            .fee_rate_bps
+            .map(|bps| bps as f64 / 10_000.0)
+            .unwrap_or(f64::INFINITY);
+        let required_model_margin = request.min_model_margin + fee_margin;
         let shares = fill
             .filter(|price| *price > 0.0)
             .map(|price| request.requested_usd / price);
@@ -235,9 +240,17 @@ impl RiskEngine {
         );
         push_check(
             &mut checks,
+            "fee_rate",
+            request
+                .fee_rate_bps
+                .is_some_and(|fee| fee <= self.policy.max_fee_rate_bps),
+            "fee rate is present and within configured maximum",
+        );
+        push_check(
+            &mut checks,
             "model_margin",
-            margin.is_some_and(|value| value >= request.min_model_margin),
-            "model margin meets threshold",
+            margin.is_some_and(|value| value >= required_model_margin),
+            "model margin covers threshold plus fee rate",
         );
         push_check(
             &mut checks,
@@ -298,14 +311,6 @@ impl RiskEngine {
             "capital_below_minimum_shares",
             matches!((shares, request.min_order_size_shares), (Some(actual), Some(minimum)) if actual >= minimum),
             "order satisfies CLOB minimum share size",
-        );
-        push_check(
-            &mut checks,
-            "fee_rate",
-            request
-                .fee_rate_bps
-                .is_some_and(|fee| fee <= self.policy.max_fee_rate_bps),
-            "fee rate is present and within configured maximum",
         );
         push_check(
             &mut checks,
@@ -428,7 +433,7 @@ mod tests {
             max_order_usd: 0.10,
             min_balance_reserve_usd: 0.0,
             max_spread: 0.04,
-            max_fee_rate_bps: 500,
+            max_fee_rate_bps: 1000,
             max_data_age_ms: 15_000,
         }
     }
@@ -531,8 +536,13 @@ mod tests {
         );
 
         let mut value = request();
-        value.fee_rate_bps = Some(501);
+        value.fee_rate_bps = Some(1001);
         assert_eq!(engine.evaluate(value).reason_code, "fee_rate");
+
+        let mut value = request();
+        value.fee_rate_bps = Some(1000);
+        value.confidence = 0.65;
+        assert_eq!(engine.evaluate(value).reason_code, "model_margin");
 
         let mut value = request();
         value.current_capital_usd = 0.09;

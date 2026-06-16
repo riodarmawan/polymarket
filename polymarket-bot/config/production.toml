@@ -16,7 +16,7 @@ max_consecutive_losses = 3
 max_spread = 0.04
 max_data_age_ms = 15000
 min_balance_reserve_usd = 0.20
-max_fee_rate_bps = 500
+max_fee_rate_bps = 1000
 
 [execution]
 order_type = "FOK"

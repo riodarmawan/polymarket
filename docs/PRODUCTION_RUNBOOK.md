@@ -260,6 +260,8 @@ Do not bypass a failed geoblock check or use a VPN to evade restrictions.
 - No martingale, averaging down, or automatic risk increase.
 - Never place an order unless current book `min_order_size`, tick size, spread,
   balance, allowance, and fee rate have been fetched and validated.
+- Fee rate may be up to `1000 bps` on these short crypto markets, but the model
+  margin must cover the configured edge plus the observed fee rate.
 - If the market minimum cannot be satisfied with the configured order cap, skip
   the market.
 - Do not assume the backtest fee. Fetch the current fee rate for every token.
