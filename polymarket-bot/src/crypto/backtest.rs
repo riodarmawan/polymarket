@@ -2,7 +2,8 @@ use crate::crypto::binance_ws::{BinanceRestClient, Candle};
 use crate::crypto::indicators::Timeframe;
 use crate::crypto::signals::Direction;
 use crate::crypto::strategy::{
-    estimate_historical_ask, predict_five_minute_continuation, predict_window,
+    estimate_historical_ask, predict_early_window, predict_fifteen_minute_latency_breakout,
+    predict_five_minute_continuation,
 };
 use std::path::Path;
 
@@ -148,19 +149,13 @@ impl CryptoBacktestEngine {
 
         for timeframe in &config.timeframes {
             let window_minutes = timeframe.candle_count();
-            let entry_minute = if *timeframe == Timeframe::M5 {
-                1
-            } else {
-                config.entry_minute.min(window_minutes.saturating_sub(1))
-            };
-            if entry_minute == 0 || window_minutes < 2 {
+            if window_minutes < 2 {
                 continue;
             }
 
             tracing::info!(
-                "Running {} settlement backtest with entry after minute {}",
+                "Running {} settlement backtest with latency-aware entries",
                 timeframe.as_str(),
-                entry_minute
             );
 
             let window_ms = window_minutes as i64 * 60_000;
@@ -185,91 +180,124 @@ impl CryptoBacktestEngine {
                 }
 
                 let global_start = first_aligned + window_index * window_minutes;
-                let entry_index = global_start + entry_minute - 1;
                 let delay_minutes = ((config.execution_delay_secs as usize) + 59) / 60;
-                let execution_index = entry_index + delay_minutes;
-                if entry_index < 60 || execution_index >= candles.len() {
-                    continue;
-                }
-                let history_start = entry_index.saturating_sub(60);
-                let available_prices: Vec<f64> = candles[history_start..=entry_index]
-                    .iter()
-                    .map(|candle| candle.close)
-                    .collect();
-                let window_open = window[0].open;
-                let signal = match if *timeframe == Timeframe::M5 {
-                    predict_five_minute_continuation(&available_prices, window_open)
+                let entry_minutes: Vec<usize> = if *timeframe == Timeframe::M5 {
+                    vec![1]
                 } else {
-                    predict_window(&available_prices, window_minutes)
-                } {
-                    Some(signal) => signal,
-                    None => continue,
+                    vec![
+                        1,
+                        2,
+                        config.entry_minute.min(window_minutes.saturating_sub(1)),
+                    ]
                 };
+                let mut selected = None;
+                for entry_minute in entry_minutes {
+                    let entry_index = global_start + entry_minute - 1;
+                    let execution_index = entry_index + delay_minutes;
+                    if entry_index < 60 || execution_index >= candles.len() {
+                        continue;
+                    }
 
-                let execution_elapsed_secs =
-                    (entry_minute as u32 * 60) + config.execution_delay_secs;
-                let (entry_start_secs, entry_end_secs, min_entry_price, max_entry_price, min_edge) =
-                    if *timeframe == Timeframe::M5 {
+                    let history_start = entry_index.saturating_sub(60);
+                    let available_prices: Vec<f64> = candles[history_start..=entry_index]
+                        .iter()
+                        .map(|candle| candle.close)
+                        .collect();
+                    let window_open = window[0].open;
+                    let signal = match if *timeframe == Timeframe::M5 {
+                        predict_five_minute_continuation(&available_prices, window_open)
+                    } else if entry_minute < config.entry_minute {
+                        predict_fifteen_minute_latency_breakout(&available_prices, window_open)
+                    } else {
+                        predict_early_window(&available_prices)
+                    } {
+                        Some(signal) => signal,
+                        None => continue,
+                    };
+
+                    let execution_elapsed_secs =
+                        (entry_minute as u32 * 60) + config.execution_delay_secs;
+                    let (
+                        entry_start_secs,
+                        entry_end_secs,
+                        min_entry_price,
+                        max_entry_price,
+                        min_edge,
+                    ) = if *timeframe == Timeframe::M5 {
                         (45, 180, 0.05, 0.62, 0.08)
                     } else {
-                        (190, 600, config.min_entry_price, config.max_entry_price, config.min_edge)
+                        (
+                            75,
+                            600,
+                            config.min_entry_price,
+                            config.max_entry_price,
+                            config.min_edge,
+                        )
                     };
-                if execution_elapsed_secs < entry_start_secs || execution_elapsed_secs > entry_end_secs
-                {
-                    continue;
-                }
+                    if execution_elapsed_secs < entry_start_secs
+                        || execution_elapsed_secs > entry_end_secs
+                    {
+                        continue;
+                    }
 
-                let entry_btc_price = candles[execution_index].close;
-                let final_btc_price = window[window_minutes - 1].close;
-                let window_went_up = final_btc_price >= window_open;
-                let signal_won = match signal.direction {
-                    Direction::Up => window_went_up,
-                    Direction::Down => !window_went_up,
-                };
-                diagnostics.raw_signals += 1;
-                diagnostics.raw_correct += usize::from(signal_won);
-                confidence_sum += signal.confidence;
-                brier_sum += (signal.confidence - if signal_won { 1.0 } else { 0.0 }).powi(2);
-                if window[entry_minute - 1].timestamp < midpoint_ts {
-                    diagnostics.first_half_signals += 1;
-                    first_half_correct += usize::from(signal_won);
-                } else {
-                    diagnostics.second_half_signals += 1;
-                    second_half_correct += usize::from(signal_won);
-                }
+                    let entry_btc_price = candles[execution_index].close;
+                    let final_btc_price = window[window_minutes - 1].close;
+                    let window_went_up = final_btc_price >= window_open;
+                    let signal_won = match signal.direction {
+                        Direction::Up => window_went_up,
+                        Direction::Down => !window_went_up,
+                    };
+                    diagnostics.raw_signals += 1;
+                    diagnostics.raw_correct += usize::from(signal_won);
+                    confidence_sum += signal.confidence;
+                    brier_sum += (signal.confidence - if signal_won { 1.0 } else { 0.0 }).powi(2);
+                    if window[entry_minute - 1].timestamp < midpoint_ts {
+                        diagnostics.first_half_signals += 1;
+                        first_half_correct += usize::from(signal_won);
+                    } else {
+                        diagnostics.second_half_signals += 1;
+                        second_half_correct += usize::from(signal_won);
+                    }
 
-                let execution_history_start = execution_index.saturating_sub(60);
-                let execution_prices: Vec<f64> = candles[execution_history_start..=execution_index]
-                    .iter()
-                    .map(|candle| candle.close)
-                    .collect();
-                let minutes_remaining = window_minutes.saturating_sub(entry_minute + delay_minutes);
-                let ask = estimate_historical_ask(
-                    &signal.direction,
-                    window_open,
-                    entry_btc_price,
-                    &execution_prices,
-                    minutes_remaining,
-                );
-                let edge = signal.confidence - ask;
-                if ask < min_entry_price || ask > max_entry_price {
-                    continue;
-                }
-                if edge < min_edge + config.fee_pct {
-                    continue;
-                }
+                    let execution_history_start = execution_index.saturating_sub(60);
+                    let execution_prices: Vec<f64> = candles
+                        [execution_history_start..=execution_index]
+                        .iter()
+                        .map(|candle| candle.close)
+                        .collect();
+                    let minutes_remaining =
+                        window_minutes.saturating_sub(entry_minute + delay_minutes);
+                    let ask = estimate_historical_ask(
+                        &signal.direction,
+                        window_open,
+                        entry_btc_price,
+                        &execution_prices,
+                        minutes_remaining,
+                    );
+                    let edge = signal.confidence - ask;
+                    if ask < min_entry_price || ask > max_entry_price {
+                        continue;
+                    }
+                    if edge < min_edge + config.fee_pct {
+                        continue;
+                    }
 
-                candidates.push(CandidateTrade {
-                    timestamp: candles[execution_index].timestamp,
-                    timeframe: *timeframe,
-                    direction: signal.direction,
-                    entry_price: entry_btc_price,
-                    exit_price: final_btc_price,
-                    market_price: ask,
-                    won: signal_won,
-                    confidence: signal.confidence,
-                    edge,
-                });
+                    selected = Some(CandidateTrade {
+                        timestamp: candles[execution_index].timestamp,
+                        timeframe: *timeframe,
+                        direction: signal.direction,
+                        entry_price: entry_btc_price,
+                        exit_price: final_btc_price,
+                        market_price: ask,
+                        won: signal_won,
+                        confidence: signal.confidence,
+                        edge,
+                    });
+                    break;
+                }
+                if let Some(candidate) = selected {
+                    candidates.push(candidate);
+                }
             }
         }
 

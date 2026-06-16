@@ -885,7 +885,7 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
     let (min_price, max_price, min_margin, entry_start, entry_end) = if timeframe == "5m" {
         (0.05, 0.62, 0.08, 45, 180)
     } else {
-        (0.15, settings.max_entry_price, settings.min_edge, 190, 600)
+        (0.15, settings.max_entry_price, settings.min_edge, 75, 600)
     };
     let elapsed_secs = chrono::Utc::now().timestamp() - market.start_ts;
     if elapsed_secs < entry_start {

@@ -1,6 +1,7 @@
 use crate::crypto::binance_ws::Candle;
 use crate::crypto::strategy::{
-    diagnose_five_minute_continuation, predict_early_window, predict_five_minute_continuation,
+    diagnose_five_minute_continuation, predict_early_window,
+    predict_fifteen_minute_latency_breakout, predict_five_minute_continuation,
 };
 use crate::web::state::SignalInfo;
 
@@ -51,7 +52,61 @@ fn evaluate_15m(
         );
     };
     let window_open = Some(candles[index].open);
-    if elapsed < 180 || index + 2 >= candles.len() {
+    if elapsed > 600 {
+        return waiting(
+            "15m",
+            &format!("Entry window expired; elapsed {elapsed}s"),
+            now_ms,
+            window_start_ts,
+            window_open,
+        );
+    }
+    if elapsed < 60 || index >= candles.len() {
+        return waiting(
+            "15m",
+            &format!("Waiting for first minute close; elapsed {elapsed}s"),
+            now_ms,
+            window_start_ts,
+            window_open,
+        );
+    }
+
+    let completed_minutes = (elapsed / 60).clamp(1, 14) as usize;
+    let latest_completed_index = index + completed_minutes - 1;
+    if latest_completed_index < candles.len() {
+        let history_start = latest_completed_index.saturating_sub(60);
+        let prices: Vec<f64> = candles[history_start..=latest_completed_index]
+            .iter()
+            .map(|candle| candle.close)
+            .collect();
+        if elapsed < 180 {
+            return match predict_fifteen_minute_latency_breakout(&prices, candles[index].open) {
+                Some(signal) => StrategyEvaluation {
+                    signal: SignalInfo {
+                        direction: signal.direction.to_string(),
+                        confidence: signal.confidence,
+                        timeframe: "15m".to_string(),
+                        reason: format!(
+                            "fast minute-{} model | {}",
+                            completed_minutes, signal.reason
+                        ),
+                        timestamp: now_ms,
+                        window_start_ts,
+                    },
+                    window_open,
+                },
+                None => waiting(
+                    "15m",
+                    "Fast model found no latency-safe breakout",
+                    now_ms,
+                    window_start_ts,
+                    window_open,
+                ),
+            };
+        }
+    }
+
+    if index + 2 >= candles.len() {
         return waiting(
             "15m",
             &format!("Waiting for minute-3 close; elapsed {elapsed}s"),
@@ -178,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn service_keeps_five_and_fifteen_minute_models_separate() {
+    fn service_routes_fast_fifteen_minute_model_after_first_close() {
         let start = 1_800;
         let mut candles: Vec<Candle> = (0..40)
             .map(|index| {
@@ -195,7 +250,8 @@ mod tests {
         let fifteen = evaluate("15m", &candles, (start + 60) * 1_000, start);
 
         assert_eq!(five.signal.timeframe, "5m");
-        assert_eq!(fifteen.signal.direction, "WAIT");
-        assert!(fifteen.signal.reason.contains("minute-3"));
+        assert_eq!(fifteen.signal.timeframe, "15m");
+        assert_eq!(fifteen.signal.direction, "Up");
+        assert!(fifteen.signal.reason.contains("fast minute-1 model"));
     }
 }

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StrategyParameters {
     pub fifteen_minute_strength_threshold: f64,
+    pub fifteen_minute_fast_opening_z_threshold: f64,
     pub five_minute_window_strength_threshold: f64,
     pub five_minute_opening_z_threshold: f64,
     pub minimum_volatility: f64,
@@ -31,6 +32,7 @@ impl Default for StrategyParameters {
     fn default() -> Self {
         Self {
             fifteen_minute_strength_threshold: 1.50,
+            fifteen_minute_fast_opening_z_threshold: 2.00,
             five_minute_window_strength_threshold: 0.55,
             five_minute_opening_z_threshold: 1.50,
             minimum_volatility: 0.000_05,
@@ -54,6 +56,81 @@ impl Default for StrategyParameters {
             historical_ask_cap: 0.95,
         }
     }
+}
+
+/// Predict a 15-minute market from the first 1-2 completed minutes.
+///
+/// This is the latency-sensitive path used before the older minute-3
+/// confirmation model. It requires a statistically large opening displacement
+/// and alignment with the short pre-window trend.
+pub fn predict_fifteen_minute_latency_breakout(
+    prices: &[f64],
+    window_open: f64,
+) -> Option<EarlyWindowSignal> {
+    predict_fifteen_minute_latency_breakout_with_params(
+        prices,
+        window_open,
+        &StrategyParameters::default(),
+    )
+}
+
+pub fn predict_fifteen_minute_latency_breakout_with_params(
+    prices: &[f64],
+    window_open: f64,
+    params: &StrategyParameters,
+) -> Option<EarlyWindowSignal> {
+    if prices.len() < 31 || window_open <= 0.0 {
+        return None;
+    }
+
+    let n = prices.len();
+    let current = prices[n - 1];
+    let displacement = (current - window_open) / window_open;
+    if displacement.abs() < 0.000_05 {
+        return None;
+    }
+
+    let prior = &prices[n - 31..n - 1];
+    let returns: Vec<f64> = prior
+        .windows(2)
+        .map(|window| (window[1] - window[0]) / window[0])
+        .collect();
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / returns.len() as f64;
+    let volatility = variance.sqrt().max(params.minimum_volatility);
+    let opening_z = displacement / volatility;
+    let prior_short = (prior[29] - prior[24]) / prior[24];
+
+    if opening_z.abs() < params.fifteen_minute_fast_opening_z_threshold
+        || prior_short.signum() != displacement.signum()
+    {
+        return None;
+    }
+
+    let confidence = (params.continuation_confidence_base
+        + (opening_z.abs() - params.fifteen_minute_fast_opening_z_threshold)
+            .min(params.continuation_confidence_excess_z_cap)
+            * params.continuation_confidence_scale)
+        .min(params.continuation_confidence_cap);
+    let direction = if displacement > 0.0 {
+        Direction::Up
+    } else {
+        Direction::Down
+    };
+
+    Some(EarlyWindowSignal {
+        direction,
+        confidence,
+        reason: format!(
+            "15m latency breakout opening_z={:.2} prior_short={:.3}%",
+            opening_z,
+            prior_short * 100.0
+        ),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -409,9 +486,21 @@ mod tests {
     fn strategy_manifest_exposes_current_thresholds() {
         let params = StrategyParameters::default();
         assert_eq!(params.fifteen_minute_strength_threshold, 1.50);
+        assert_eq!(params.fifteen_minute_fast_opening_z_threshold, 2.00);
         assert_eq!(params.five_minute_opening_z_threshold, 1.50);
         assert_eq!(params.continuation_confidence_cap, 0.79);
         assert_eq!(params.historical_ask_premium, 0.015);
+    }
+
+    #[test]
+    fn predicts_fast_fifteen_minute_breakout() {
+        let mut prices: Vec<f64> = (0..30).map(|index| 100.0 + index as f64 * 0.02).collect();
+        let window_open = *prices.last().expect("price");
+        prices.push(window_open + 0.28);
+        let signal = predict_fifteen_minute_latency_breakout(&prices, window_open)
+            .expect("expected fast breakout");
+        assert_eq!(signal.direction, Direction::Up);
+        assert!(signal.confidence >= 0.70);
     }
 
     #[test]
