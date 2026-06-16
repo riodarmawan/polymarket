@@ -318,6 +318,7 @@ impl ClobOrderBook {
     }
 }
 
+#[derive(Clone)]
 pub struct GammaClient {
     base_url: String,
     client: reqwest::Client,
@@ -406,6 +407,7 @@ impl GammaClient {
     }
 }
 
+#[derive(Clone)]
 pub struct ClobClient {
     base_url: String,
     client: reqwest::Client,

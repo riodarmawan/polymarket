@@ -6,10 +6,15 @@ pub mod ws;
 use crate::config::Config;
 use crate::crypto::binance_ws::{BinanceRestClient, Candle};
 use crate::crypto::live::gamma_client::{
-    generate_updown_slug, get_current_interval_start, get_remaining_seconds, ClobClient,
+    generate_updown_slug, get_current_interval_start, get_remaining_seconds, BuyQuote, ClobClient,
     GammaClient,
 };
-use crate::engine::risk::{Direction, RiskDecision, RiskEngine, RiskPolicy, RiskRequest};
+use crate::engine::microstructure::{
+    estimate_probability, executable_quote, timing_for, ProbabilityInput, QuoteDecision, QuoteInput,
+};
+use crate::engine::risk::{
+    Direction, RiskCheck, RiskDecision, RiskEngine, RiskPolicy, RiskRequest,
+};
 use crate::engine::strategy_service;
 use axum::Router;
 use state::AppState;
@@ -23,6 +28,8 @@ use tower_http::services::ServeDir;
 // Assets to scan for Up/Down markets
 const CRYPTO_ASSETS: &[&str] = &["btc"];
 const MAX_CLOCK_DRIFT_MS: i64 = 5_000;
+const MAX_SIGNAL_AGE_MS: i64 = 15_000;
+const MAKER_TIME_IN_FORCE_MS: u64 = 1_500;
 
 pub async fn run_web_server(port: u16, config: &Config) -> anyhow::Result<()> {
     let state = AppState::new(config).await?;
@@ -186,6 +193,25 @@ async fn run_updown_scanner(state: AppState, gamma_base_url: String, clob_base_u
             let end_ts = current_start + interval_minutes as i64 * 60;
             let remaining = get_remaining_seconds(end_ts);
             let slug = generate_updown_slug(asset, interval, current_start);
+            let next_start = current_start + interval_minutes as i64 * 60;
+            let seconds_until_next = next_start - chrono::Utc::now().timestamp();
+            if (0..=90).contains(&seconds_until_next) {
+                let gamma = gamma_client.clone();
+                let clob = clob_client.clone();
+                let asset = asset.to_string();
+                let interval = interval.to_string();
+                tokio::spawn(async move {
+                    prewarm_next_updown_market(
+                        &gamma,
+                        &clob,
+                        &asset,
+                        &interval,
+                        next_start,
+                        seconds_until_next,
+                    )
+                    .await;
+                });
+            }
 
             match gamma_client.fetch_event_by_slug(&slug).await {
                 Ok(Some(event)) => {
@@ -504,6 +530,56 @@ fn classify_market_data_error(error: &anyhow::Error) -> state::DataStatus {
         state::DataStatus::InvalidPayload
     } else {
         state::DataStatus::Unavailable
+    }
+}
+
+async fn prewarm_next_updown_market(
+    gamma_client: &GammaClient,
+    clob_client: &ClobClient,
+    asset: &str,
+    interval: &str,
+    next_start: i64,
+    seconds_until_next: i64,
+) {
+    let slug = generate_updown_slug(asset, interval, next_start);
+    let result = tokio::time::timeout(tokio::time::Duration::from_secs(4), async {
+        let Some(event) = gamma_client.fetch_event_by_slug(&slug).await? else {
+            anyhow::bail!("next event not found");
+        };
+        let market = event
+            .markets
+            .as_ref()
+            .and_then(|markets| markets.first())
+            .ok_or_else(|| anyhow::anyhow!("next event has no market"))?;
+        let (up_token, down_token) = market
+            .mapped_up_down_tokens()
+            .ok_or_else(|| anyhow::anyhow!("next event token mapping unavailable"))?;
+        let (up_book, down_book) = tokio::join!(
+            clob_client.fetch_orderbook(&up_token),
+            clob_client.fetch_orderbook(&down_token)
+        );
+        up_book?
+            .validated_top_of_book(&up_token)
+            .ok_or_else(|| anyhow::anyhow!("next UP book invalid"))?;
+        down_book?
+            .validated_top_of_book(&down_token)
+            .ok_or_else(|| anyhow::anyhow!("next DOWN book invalid"))?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => tracing::debug!(
+            slug,
+            seconds_until_next,
+            "Prewarmed next Up/Down market metadata and CLOB books"
+        ),
+        Ok(Err(error)) => tracing::debug!(
+            slug,
+            seconds_until_next,
+            "Next Up/Down prewarm skipped: {error}"
+        ),
+        Err(_) => tracing::debug!(slug, seconds_until_next, "Next Up/Down prewarm timed out"),
     }
 }
 
@@ -882,34 +958,59 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
         return;
     };
 
-    let (min_price, max_price, min_margin, entry_start, entry_end) = if timeframe == "5m" {
-        (0.05, 0.62, 0.08, 45, 180)
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let elapsed_secs = now_ms / 1_000 - market.start_ts;
+    let timing = timing_for(timeframe, elapsed_secs);
+    let (min_price, max_price, min_margin) = if timeframe == "5m" {
+        (0.05, 0.62, 0.08)
     } else {
-        (0.15, settings.max_entry_price, settings.min_edge, 75, 600)
+        (0.15, settings.max_entry_price, settings.min_edge)
     };
-    let elapsed_secs = chrono::Utc::now().timestamp() - market.start_ts;
-    if elapsed_secs < entry_start {
+    if timing.reason_code == "entry_not_open" {
         set_timeframe_note(
             state,
             timeframe,
             &format!(
                 "Waiting for entry window: {}s / {}-{}s",
-                elapsed_secs, entry_start, entry_end
+                elapsed_secs, timing.entry_start_secs, timing.entry_end_secs
             ),
         )
         .await;
         return;
     }
-    if elapsed_secs > entry_end {
+    if timing.reason_code == "entry_deadline" {
         set_timeframe_note(
             state,
             timeframe,
             &format!(
-                "Skip: entry window expired {}s / {}-{}s",
-                elapsed_secs, entry_start, entry_end
+                "Skip: entry deadline {}s / {}-{}s",
+                elapsed_secs, timing.entry_start_secs, timing.entry_end_secs
             ),
         )
         .await;
+        return;
+    }
+    if now_ms - signal.timestamp > MAX_SIGNAL_AGE_MS {
+        let decision = stale_signal_decision();
+        if let Err(error) = state
+            .record_risk_decision_with_context(
+                &market.slug,
+                timeframe,
+                &decision,
+                serde_json::json!({
+                    "signal_age_ms": now_ms - signal.timestamp,
+                    "max_signal_age_ms": MAX_SIGNAL_AGE_MS,
+                    "elapsed_secs": elapsed_secs,
+                    "entry_layer": timing.layer.map(|layer| layer.as_str())
+                }),
+            )
+            .await
+        {
+            state
+                .halt_after_persistence_failure("stale signal risk persistence", &error)
+                .await;
+        }
+        set_timeframe_note(state, timeframe, "Skip: central risk rejected stale_signal").await;
         return;
     }
 
@@ -931,6 +1032,54 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
     risk_stats.current_capital = stats.current_capital;
     risk_stats.peak_capital = risk_stats.peak_capital.max(stats.peak_capital);
     risk_stats.max_drawdown = risk_stats.max_drawdown.max(stats.max_drawdown);
+    let adjusted = microstructure_probability(&market, &signal, elapsed_secs, now_ms);
+    let direction = Direction::parse(&signal.direction);
+    let up_quote = market.up_expected_fill_price.map(|price| BuyQuote {
+        average_price: price,
+        shares: size_usd / price,
+        available_depth_usd: market.up_executable_depth_usd,
+    });
+    let down_quote = market.down_expected_fill_price.map(|price| BuyQuote {
+        average_price: price,
+        shares: size_usd / price,
+        available_depth_usd: market.down_executable_depth_usd,
+    });
+    let quote_decision = direction.clone().map(|direction| {
+        executable_quote(QuoteInput {
+            direction,
+            probability_up: adjusted.adjusted_probability_up,
+            up_quote,
+            down_quote,
+            up_best_bid: market.up_best_bid,
+            down_best_bid: market.down_best_bid,
+            min_edge: min_margin,
+            requested_usd: size_usd,
+            tick_size: market.tick_size.unwrap_or(0.01),
+            timing,
+            maker_time_in_force_ms: MAKER_TIME_IN_FORCE_MS,
+        })
+    });
+    let (override_fill, override_depth, quote_reason, maker_bid) = match quote_decision.as_ref() {
+        Some(QuoteDecision::Taker {
+            price,
+            depth_usd,
+            edge: _,
+            ..
+        }) => (Some(*price), *depth_usd, "taker", None),
+        Some(QuoteDecision::Maker {
+            bid_price,
+            reason_code,
+            ..
+        }) => (Some(*bid_price), size_usd, *reason_code, Some(*bid_price)),
+        Some(QuoteDecision::Reject { reason_code }) => (None, 0.0, *reason_code, None),
+        None => (None, 0.0, "invalid_direction", None),
+    };
+
+    let target_probability = match direction.as_ref() {
+        Some(Direction::Up) => adjusted.adjusted_probability_up,
+        Some(Direction::Down) => 1.0 - adjusted.adjusted_probability_up,
+        None => 0.0,
+    };
 
     let risk_decision = evaluate_trade_risk(
         state,
@@ -943,15 +1092,13 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
         min_price,
         max_price,
         min_margin,
-        entry_start,
-        entry_end,
+        timing.entry_start_secs,
+        timing.entry_end_secs,
+        override_fill,
+        override_depth,
+        target_probability,
     );
-    let direction = Direction::parse(&signal.direction);
-    let expected_fill_price = match direction {
-        Some(Direction::Up) => market.up_expected_fill_price,
-        Some(Direction::Down) => market.down_expected_fill_price,
-        None => None,
-    };
+    let expected_fill_price = override_fill;
     let expected_shares = expected_fill_price
         .filter(|price| *price > 0.0)
         .map(|price| size_usd / price);
@@ -966,7 +1113,17 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
             "confidence": signal.confidence,
             "reason": signal.reason.clone(),
             "timestamp_ms": signal.timestamp,
-            "window_start_ts": signal.window_start_ts
+            "window_start_ts": signal.window_start_ts,
+            "age_ms": audit_now_ms - signal.timestamp,
+            "max_signal_age_ms": MAX_SIGNAL_AGE_MS
+        },
+        "model": {
+            "model_probability_up": adjusted.model_probability_up,
+            "adjusted_probability_up": adjusted.adjusted_probability_up,
+            "target_probability": target_probability,
+            "entry_layer": timing.layer.map(|layer| layer.as_str()),
+            "quote_decision": quote_reason,
+            "maker_bid": maker_bid
         },
         "sizing": {
             "requested_usd": size_usd,
@@ -984,8 +1141,8 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
             "min_entry_price": min_price,
             "max_entry_price": max_price,
             "min_model_margin": min_margin,
-            "entry_window_start_secs": entry_start,
-            "entry_window_end_secs": entry_end,
+            "entry_window_start_secs": timing.entry_start_secs,
+            "entry_window_end_secs": timing.entry_end_secs,
             "elapsed_secs": audit_now_ms / 1_000 - market.start_ts
         },
         "market_snapshot": {
@@ -996,6 +1153,9 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
             "fee_rate_bps": market.fee_rate_bps,
             "up_depth_usd": market.up_executable_depth_usd,
             "down_depth_usd": market.down_executable_depth_usd,
+            "target_executable_depth_usd": override_depth,
+            "book_age_ms": audit_now_ms - market.captured_at_ms,
+            "max_orderbook_age_ms": state.runtime.configured_max_data_age_ms,
             "clock_drift_ms": market.clock_drift_ms
         }
     });
@@ -1037,6 +1197,23 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
         .await;
         return;
     };
+    if matches!(quote_decision, Some(QuoteDecision::Maker { .. })) {
+        drop(stats_5m);
+        drop(stats);
+        drop(trades);
+        set_timeframe_note(
+            state,
+            timeframe,
+            &format!(
+                "Maker fallback armed {} @ {:.2} for {}ms",
+                signal.direction,
+                maker_bid.unwrap_or_default(),
+                MAKER_TIME_IN_FORCE_MS
+            ),
+        )
+        .await;
+        return;
+    }
     match state.reserve_execution_intent(intent).await {
         Ok(true) => {}
         Ok(false) => {
@@ -1284,9 +1461,54 @@ fn should_audit_execution_note(note: &str) -> bool {
     note.starts_with("Skip:")
         || note.starts_with("HALT:")
         || note.starts_with("Paper BUY")
+        || note.starts_with("Maker fallback")
         || note.starts_with("Already traded")
         || note.contains("circuit breaker")
         || note.contains("halted:")
+}
+
+fn stale_signal_decision() -> RiskDecision {
+    RiskDecision {
+        approved: false,
+        reason_code: "stale_signal".to_string(),
+        checks: vec![RiskCheck {
+            code: "stale_signal".to_string(),
+            passed: false,
+            detail: "signal age exceeded max_signal_age_ms".to_string(),
+        }],
+        intent: None,
+    }
+}
+
+fn microstructure_probability(
+    market: &state::UpDownMarket,
+    signal: &state::SignalInfo,
+    elapsed_secs: i64,
+    now_ms: i64,
+) -> crate::engine::microstructure::ProbabilityEstimate {
+    let tau_seconds = (market.end_ts - now_ms / 1_000).max(1) as f64;
+    let side_bias = if signal.direction == "Up" { 1.0 } else { -1.0 };
+    let momentum = ((signal.confidence - 0.5) * 0.10 * side_bias).clamp(-0.03, 0.03);
+    let up_depth = market.up_executable_depth_usd.max(0.0);
+    let down_depth = market.down_executable_depth_usd.max(0.0);
+    let book_imbalance = if up_depth + down_depth > 0.0 {
+        (up_depth - down_depth) / (up_depth + down_depth)
+    } else {
+        0.0
+    };
+    let price_scale = market.current_price.max(1.0);
+    let realized_vol = (price_scale * 0.000_25).max(1.0);
+    estimate_probability(ProbabilityInput {
+        current_price: market.current_price,
+        price_to_beat: market.price_to_beat,
+        drift_per_second: momentum * price_scale / tau_seconds.max(1.0),
+        realized_vol_per_sqrt_second: realized_vol,
+        tau_seconds,
+        momentum,
+        book_imbalance,
+        spread: market.spread,
+        latency_ms: now_ms - signal.timestamp + elapsed_secs.max(0) * 10,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1303,20 +1525,15 @@ fn evaluate_trade_risk(
     min_model_margin: f64,
     entry_window_start_secs: i64,
     entry_window_end_secs: i64,
+    override_fill_price: Option<f64>,
+    override_depth_usd: f64,
+    model_confidence: f64,
 ) -> RiskDecision {
     let direction = Direction::parse(&signal.direction);
-    let (token_id, expected_fill_price, executable_depth_usd) = match direction {
-        Some(Direction::Up) => (
-            market.up_token_id.clone(),
-            market.up_expected_fill_price,
-            market.up_executable_depth_usd,
-        ),
-        Some(Direction::Down) => (
-            market.down_token_id.clone(),
-            market.down_expected_fill_price,
-            market.down_executable_depth_usd,
-        ),
-        None => (None, None, 0.0),
+    let token_id = match direction {
+        Some(Direction::Up) => market.up_token_id.clone(),
+        Some(Direction::Down) => market.down_token_id.clone(),
+        None => None,
     };
     let settled_for_strategy: Vec<&state::TradeInfo> = trades
         .iter()
@@ -1365,13 +1582,13 @@ fn evaluate_trade_risk(
         market_snapshot_timestamp_ms: market.captured_at_ms,
         data_ready: validate_market_freshness(market, &state.runtime).is_ok(),
         price_to_beat: market.price_to_beat,
-        expected_fill_price,
+        expected_fill_price: override_fill_price,
         min_entry_price,
         max_entry_price,
-        confidence: signal.confidence,
+        confidence: model_confidence,
         min_model_margin,
         spread: market.spread,
-        executable_depth_usd,
+        executable_depth_usd: override_depth_usd,
         min_order_size_shares: market.min_order_size,
         fee_rate_bps: market.fee_rate_bps,
         requested_usd,
@@ -1386,6 +1603,8 @@ fn evaluate_trade_risk(
         market_already_traded: trades.iter().any(|trade| trade.market_slug == market.slug),
         entry_window_start_secs,
         entry_window_end_secs,
+        max_signal_age_ms: MAX_SIGNAL_AGE_MS,
+        max_orderbook_age_ms: state.runtime.configured_max_data_age_ms as i64,
     })
 }
 
@@ -1393,16 +1612,21 @@ fn validate_market_freshness(
     market: &state::UpDownMarket,
     runtime: &state::RuntimeInfo,
 ) -> Result<(), &'static str> {
-    if market.data_status != state::DataStatus::Ready || !market.token_mapping_valid {
+    if !matches!(
+        market.data_status,
+        state::DataStatus::Ready | state::DataStatus::OneSided
+    ) || !market.token_mapping_valid
+    {
         return Err("is incomplete or invalid");
     }
     if market.up_best_ask.is_none()
-        || market.up_best_bid.is_none()
-        || market.down_best_ask.is_none()
-        || market.down_best_bid.is_none()
-        || market.up_expected_fill_price.is_none()
-        || market.down_expected_fill_price.is_none()
-        || market.tick_size.is_none()
+        && market.down_best_ask.is_none()
+        && market.up_best_bid.is_none()
+        && market.down_best_bid.is_none()
+    {
+        return Err("has no executable or maker-side orderbook levels");
+    }
+    if market.tick_size.is_none()
         || market.min_order_size.is_none()
         || market.fee_rate_bps.is_none()
         || market

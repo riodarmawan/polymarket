@@ -130,6 +130,8 @@ pub struct RiskRequest {
     pub market_already_traded: bool,
     pub entry_window_start_secs: i64,
     pub entry_window_end_secs: i64,
+    pub max_signal_age_ms: i64,
+    pub max_orderbook_age_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -207,15 +209,18 @@ impl RiskEngine {
         );
         push_check(
             &mut checks,
-            "signal_freshness",
-            request.now_ms - request.signal_timestamp_ms <= 30_000,
-            "signal must be at most 30 seconds old",
+            "stale_signal",
+            request.now_ms - request.signal_timestamp_ms <= request.max_signal_age_ms,
+            "signal age must be inside max_signal_age_ms",
         );
         push_check(
             &mut checks,
-            "snapshot_freshness",
-            request.now_ms - request.market_snapshot_timestamp_ms <= self.policy.max_data_age_ms,
-            "market snapshot is within configured age",
+            "stale_orderbook",
+            request.now_ms - request.market_snapshot_timestamp_ms
+                <= request
+                    .max_orderbook_age_ms
+                    .min(self.policy.max_data_age_ms),
+            "orderbook age must be inside max_orderbook_age_ms",
         );
         push_check(
             &mut checks,
@@ -296,7 +301,7 @@ impl RiskEngine {
         );
         push_check(
             &mut checks,
-            "no_executable_depth",
+            "no_executable_ask",
             request.executable_depth_usd > 0.0,
             "target side has executable ask depth",
         );
@@ -473,6 +478,8 @@ mod tests {
             market_already_traded: false,
             entry_window_start_secs: 180,
             entry_window_end_secs: 210,
+            max_signal_age_ms: 30_000,
+            max_orderbook_age_ms: 15_000,
         }
     }
 
@@ -517,12 +524,18 @@ mod tests {
     fn rejects_stale_depth_fee_minimum_and_balance_failures() {
         let engine = RiskEngine::new(policy());
         let mut value = request();
+        value.now_ms = 1_638_000;
+        value.signal_timestamp_ms = 1_180_000;
+        value.entry_window_end_secs = 600;
+        assert_eq!(engine.evaluate(value).reason_code, "stale_signal");
+
+        let mut value = request();
         value.market_snapshot_timestamp_ms = 1_000_000;
-        assert_eq!(engine.evaluate(value).reason_code, "snapshot_freshness");
+        assert_eq!(engine.evaluate(value).reason_code, "stale_orderbook");
 
         let mut value = request();
         value.executable_depth_usd = 0.0;
-        assert_eq!(engine.evaluate(value).reason_code, "no_executable_depth");
+        assert_eq!(engine.evaluate(value).reason_code, "no_executable_ask");
 
         let mut value = request();
         value.executable_depth_usd = 0.09;
