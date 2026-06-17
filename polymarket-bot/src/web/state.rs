@@ -28,9 +28,9 @@ impl Default for Settings {
             max_order: 4.00,
             timeframe: "15m".to_string(),
             auto_trade: true,
-            min_edge: 0.10,
-            max_entry_price: 0.60,
-            risk_fraction: 0.50,
+            min_edge: 0.04,
+            max_entry_price: 0.72,
+            risk_fraction: 0.10,
         }
     }
 }
@@ -42,8 +42,8 @@ impl Settings {
             max_order: config.risk.max_order_usd,
             timeframe: "15m".to_string(),
             auto_trade: true,
-            min_edge: config.expected_value.min_edge_pct.max(0.10),
-            max_entry_price: 0.60,
+            min_edge: config.expected_value.min_edge_pct,
+            max_entry_price: 0.72,
             risk_fraction: config.position_sizing.max_position_pct,
         }
     }
@@ -290,6 +290,15 @@ impl AppState {
         if settings.max_order < runtime.configured_min_order_usd {
             settings.max_order = runtime.configured_max_order_usd;
         }
+        if settings.max_order > runtime.configured_max_order_usd {
+            settings.max_order = runtime.configured_max_order_usd;
+        }
+        if settings.risk_fraction > runtime.configured_max_risk_fraction {
+            settings.risk_fraction = runtime.configured_max_risk_fraction;
+        }
+        if settings.min_edge > runtime.configured_min_edge {
+            settings.min_edge = runtime.configured_min_edge;
+        }
         if !settings.respects(&runtime) {
             anyhow::bail!("restored dashboard settings exceed the active configuration limits");
         }
@@ -479,7 +488,7 @@ impl RuntimeInfo {
             configured_max_drawdown: config.risk.max_drawdown,
             configured_max_consecutive_losses: config.risk.max_consecutive_losses,
             configured_max_risk_fraction: config.position_sizing.max_position_pct,
-            configured_min_edge: config.expected_value.min_edge_pct.max(0.10),
+            configured_min_edge: config.expected_value.min_edge_pct,
             configured_fee_pct: config.expected_value.cost_per_trade_pct,
             configured_max_data_age_ms: config.risk.max_data_age_ms,
             configured_trading_enabled: config.risk.trading_enabled,

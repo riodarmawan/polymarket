@@ -320,4 +320,22 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn barrier_probability_uses_per_second_volatility_scale() {
+        let estimate = estimate_probability(ProbabilityInput {
+            current_price: 100_080.0,
+            price_to_beat: 100_000.0,
+            drift_per_second: 0.0,
+            realized_vol_per_sqrt_second: 100_000.0 * 0.000_25 / 60.0_f64.sqrt(),
+            tau_seconds: 180.0,
+            momentum: 0.0,
+            book_imbalance: 0.0,
+            spread: 0.02,
+            latency_ms: 500,
+        });
+
+        assert!(estimate.model_probability_up > 0.80);
+        assert!(estimate.adjusted_probability_up > 0.79);
+    }
 }

@@ -962,7 +962,7 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
     let elapsed_secs = now_ms / 1_000 - market.start_ts;
     let timing = timing_for(timeframe, elapsed_secs);
     let (min_price, max_price, min_margin) = if timeframe == "5m" {
-        (0.05, 0.62, 0.08)
+        (0.05, settings.max_entry_price, settings.min_edge)
     } else {
         (0.15, settings.max_entry_price, settings.min_edge)
     };
@@ -1014,11 +1014,24 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
         return;
     }
 
+    let direction = Direction::parse(&signal.direction);
+    let target_fill_for_sizing = match direction.as_ref() {
+        Some(Direction::Up) => market.up_expected_fill_price,
+        Some(Direction::Down) => market.down_expected_fill_price,
+        None => None,
+    };
+    let min_share_order_usd = match (target_fill_for_sizing, market.min_order_size) {
+        (Some(price), Some(minimum_shares)) if price.is_finite() && minimum_shares.is_finite() => {
+            price * minimum_shares
+        }
+        _ => state.runtime.configured_min_order_usd,
+    };
     let mut trades = state.trades.write().await;
     let mut stats = state.stats.write().await;
     let mut stats_5m = state.stats_5m.write().await;
     let size_usd = (stats.current_capital * settings.risk_fraction)
         .max(state.runtime.configured_min_order_usd)
+        .max(min_share_order_usd)
         .min(settings.max_order);
     let fee_usd = market
         .fee_rate_bps
@@ -1033,7 +1046,6 @@ async fn try_open_unified_trade(state: &AppState, timeframe: &str) {
     risk_stats.peak_capital = risk_stats.peak_capital.max(stats.peak_capital);
     risk_stats.max_drawdown = risk_stats.max_drawdown.max(stats.max_drawdown);
     let adjusted = microstructure_probability(&market, &signal, elapsed_secs, now_ms);
-    let direction = Direction::parse(&signal.direction);
     let up_quote = market.up_expected_fill_price.map(|price| BuyQuote {
         average_price: price,
         shares: size_usd / price,
@@ -1497,11 +1509,12 @@ fn microstructure_probability(
         0.0
     };
     let price_scale = market.current_price.max(1.0);
-    let realized_vol = (price_scale * 0.000_25).max(1.0);
+    let minute_vol_return = 0.000_25_f64;
+    let realized_vol = (price_scale * minute_vol_return / 60.0_f64.sqrt()).max(0.01);
     estimate_probability(ProbabilityInput {
         current_price: market.current_price,
         price_to_beat: market.price_to_beat,
-        drift_per_second: momentum * price_scale / tau_seconds.max(1.0),
+        drift_per_second: momentum * price_scale / (tau_seconds.max(1.0) * 4.0),
         realized_vol_per_sqrt_second: realized_vol,
         tau_seconds,
         momentum,

@@ -350,8 +350,8 @@ async fn main() -> anyhow::Result<()> {
                 fee_pct: 0.10,
                 timeframes,
                 min_entry_price: 0.15,
-                max_entry_price: 0.60,
-                min_edge: 0.10,
+                max_entry_price: 0.72,
+                min_edge: config.expected_value.min_edge_pct,
                 entry_minute: 3,
                 execution_delay_secs,
                 source_interval_minutes: source_interval,
@@ -431,6 +431,17 @@ async fn main() -> anyhow::Result<()> {
                         "  Realistic executable stress trades: {} | accuracy: {:.1}%",
                         result.total_trades,
                         result.win_rate * 100.0
+                    );
+                    println!(
+                        "  Opportunity funnel: quote rejects {}, maker unfilled {}, price band {}, edge+fee {}, executable candidates {}, drawdown skips {}, min-share skips {}, m5 cooldown skips {}",
+                        result.diagnostics.quote_rejected,
+                        result.diagnostics.maker_unfilled,
+                        result.diagnostics.price_band_rejected,
+                        result.diagnostics.edge_fee_rejected,
+                        result.diagnostics.executable_candidates,
+                        result.diagnostics.drawdown_rejected,
+                        result.diagnostics.min_share_rejected,
+                        result.diagnostics.m5_cooldown_rejected
                     );
                     println!(
                         "  WARNING: PnL uses simulated orderbook odds, execution delay, fee, and minimum-share filters; real CLOB depth can still differ."

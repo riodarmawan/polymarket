@@ -39,13 +39,13 @@ impl Default for CryptoBacktestConfig {
             initial_capital: 7.50,
             min_order_usd: 0.50,
             max_order_usd: 4.00,
-            risk_fraction: 0.50,
+            risk_fraction: 0.10,
             min_order_shares: 5.0,
             fee_pct: 0.10,
             timeframes: vec![Timeframe::M15],
             min_entry_price: 0.15,
-            max_entry_price: 0.60,
-            min_edge: 0.10,
+            max_entry_price: 0.72,
+            min_edge: 0.04,
             entry_minute: 3,
             execution_delay_secs: 30,
             source_interval_minutes: 1,
@@ -112,6 +112,14 @@ pub struct ModelDiagnostics {
     pub first_half_accuracy: f64,
     pub second_half_signals: usize,
     pub second_half_accuracy: f64,
+    pub quote_rejected: usize,
+    pub maker_unfilled: usize,
+    pub price_band_rejected: usize,
+    pub edge_fee_rejected: usize,
+    pub executable_candidates: usize,
+    pub drawdown_rejected: usize,
+    pub min_share_rejected: usize,
+    pub m5_cooldown_rejected: usize,
 }
 
 pub struct CryptoBacktestEngine {
@@ -229,7 +237,7 @@ impl CryptoBacktestEngine {
                     }
                     let (min_entry_price, max_entry_price, min_edge) =
                         if *timeframe == Timeframe::M5 {
-                            (0.05, 0.62, 0.08)
+                            (0.05, config.max_entry_price, config.min_edge)
                         } else {
                             (
                                 config.min_entry_price,
@@ -327,15 +335,25 @@ impl CryptoBacktestEngine {
                         {
                             (bid_price, edge)
                         }
-                        _ => continue,
+                        QuoteDecision::Maker { .. } => {
+                            diagnostics.maker_unfilled += 1;
+                            continue;
+                        }
+                        QuoteDecision::Reject { .. } => {
+                            diagnostics.quote_rejected += 1;
+                            continue;
+                        }
                     };
                     if fill_price < min_entry_price || fill_price > max_entry_price {
+                        diagnostics.price_band_rejected += 1;
                         continue;
                     }
                     if edge < min_edge + config.fee_pct {
+                        diagnostics.edge_fee_rejected += 1;
                         continue;
                     }
 
+                    diagnostics.executable_candidates += 1;
                     selected = Some(CandidateTrade {
                         timestamp: candles[execution_index].timestamp,
                         timeframe: *timeframe,
@@ -363,6 +381,7 @@ impl CryptoBacktestEngine {
         let mut m5_pause_until = 0i64;
         for candidate in candidates {
             if candidate.timeframe == Timeframe::M5 && candidate.timestamp < m5_pause_until {
+                diagnostics.m5_cooldown_rejected += 1;
                 continue;
             }
 
@@ -371,7 +390,8 @@ impl CryptoBacktestEngine {
             } else {
                 0.0
             };
-            if current_drawdown >= 0.25 {
+            if current_drawdown >= 0.20 {
+                diagnostics.drawdown_rejected += 1;
                 continue;
             }
 
@@ -382,8 +402,10 @@ impl CryptoBacktestEngine {
             } else {
                 1.0
             };
+            let min_share_order_usd = candidate.market_price * config.min_order_shares;
             let size_usd = (capital * config.risk_fraction * drawdown_scale)
                 .max(config.min_order_usd)
+                .max(min_share_order_usd)
                 .min(config.max_order_usd)
                 .min(capital);
             if size_usd < config.min_order_usd || capital < size_usd {
@@ -393,6 +415,7 @@ impl CryptoBacktestEngine {
             let fee = size_usd * config.fee_pct;
             let shares = size_usd / candidate.market_price;
             if shares < config.min_order_shares {
+                diagnostics.min_share_rejected += 1;
                 continue;
             }
             let pnl = if candidate.won {
@@ -572,17 +595,18 @@ fn microstructure_probability(
         .windows(2)
         .filter_map(|window| (window[0] > 0.0).then_some((window[1] - window[0]) / window[0]))
         .collect();
-    let realized_vol_return = if returns.is_empty() {
-        0.000_5
+    let (mean_return_per_minute, realized_vol_return_per_minute) = if returns.is_empty() {
+        (0.0, 0.000_5)
     } else {
         let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-        (returns
+        let vol = (returns
             .iter()
             .map(|value| (value - mean).powi(2))
             .sum::<f64>()
             / returns.len() as f64)
             .sqrt()
-            .max(0.000_1)
+            .max(0.000_1);
+        (mean, vol)
     };
     let side = match direction {
         Direction::Up => 1.0,
@@ -593,11 +617,19 @@ fn microstructure_probability(
     let down_depth = (1.0 - down_ask).max(0.01);
     let book_imbalance = (up_depth - down_depth) / (up_depth + down_depth);
     let tau_seconds = (minutes_remaining.max(1) * 60) as f64;
+    let drift_per_second = current_price
+        * mean_return_per_minute.clamp(
+            -2.0 * realized_vol_return_per_minute,
+            2.0 * realized_vol_return_per_minute,
+        )
+        / 60.0;
+    let realized_vol_per_sqrt_second =
+        current_price * realized_vol_return_per_minute.max(0.000_25) / 60.0_f64.sqrt();
     estimate_probability(ProbabilityInput {
         current_price,
         price_to_beat: window_open,
-        drift_per_second: momentum * current_price / tau_seconds,
-        realized_vol_per_sqrt_second: current_price * realized_vol_return.max(0.000_25),
+        drift_per_second,
+        realized_vol_per_sqrt_second,
         tau_seconds,
         momentum,
         book_imbalance,
