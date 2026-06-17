@@ -57,8 +57,9 @@
                         <div id="data-health" class="text-sm font-bold yellow mt-1">DATA STARTING</div>
                     </div>
                     <div class="panel-soft p-3">
-                        <div class="label">Shared Capital</div>
+                        <div class="label" id="capital-label">Local Shared Capital</div>
                         <div class="text-lg font-bold green mt-1">$<span id="capital">2.00</span></div>
+                        <div id="capital-subtitle" class="text-xs text-gray-500">Paper balance, not wallet USDC</div>
                     </div>
                     <div class="panel-soft p-3">
                         <div class="label">BTC/USDT</div>
@@ -73,8 +74,9 @@
             <div class="panel p-4">
                 <div class="label mb-2">Polymarket Account</div>
                 <div id="account-status" class="text-sm yellow">Checking remote account...</div>
+                <div id="account-detail" class="text-xs text-gray-500 mt-2">Wallet status has not loaded yet</div>
                 <div class="grid grid-cols-2 gap-2 text-xs text-gray-300 mt-3">
-                    <div class="metric">Balance<br><b id="remote-balance" class="text-lg green">-</b></div>
+                    <div class="metric">Wallet USDC<br><b id="remote-balance" class="text-lg green">-</b></div>
                     <div class="metric">Allowances<br><b id="remote-allowances" class="text-lg">-</b></div>
                     <div class="metric">Open Orders<br><b id="remote-open-orders" class="text-lg">-</b></div>
                     <div class="metric">Positions<br><b id="remote-positions" class="text-lg">-</b></div>
@@ -234,6 +236,6 @@
         </section>
     </div>
 
-    <script src="app.js"></script>
+    <script src="app.js?v=20260617-wallet-status"></script>
 </body>
 </html>

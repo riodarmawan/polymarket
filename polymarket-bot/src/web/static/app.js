@@ -209,8 +209,14 @@ async function refreshHealth() {
         const autoLive = health.production_control?.auto_live_execution_enabled
             ? 'AUTO LIVE ARMED'
             : 'AUTO LIVE OFF';
-        el.textContent = `DATA ${health.overall.toUpperCase()} · markets ${health.markets.ready}/${health.markets.total} · ${autoLive}`;
-        el.className = health.overall === 'ready'
+        const walletReady = health.production_control?.reconciliation_ready
+            ? 'wallet reconciled'
+            : 'wallet not reconciled';
+        const liveSwitch = health.production_control?.live_switch_enabled
+            ? 'live switch on'
+            : 'paper/no live orders';
+        el.textContent = `DATA ${health.overall.toUpperCase()} · markets ${health.markets.ready}/${health.markets.total} · ${autoLive} · ${walletReady} · ${liveSwitch}`;
+        el.className = health.overall === 'ready' && health.production_control?.reconciliation_ready
             ? 'text-green-400 text-sm font-bold'
             : 'text-yellow-400 text-sm font-bold';
     } catch (err) {
@@ -222,11 +228,23 @@ async function refreshHealth() {
 
 async function refreshAccount() {
     const statusEl = document.getElementById('account-status');
+    const detailEl = document.getElementById('account-detail');
     try {
         const account = await (await fetch('/api/account')).json();
         if (!account.connected) {
-            statusEl.textContent = 'Remote account unavailable';
+            const reason = account.reason || 'Remote account could not be checked';
+            const isMissingSecret = reason.includes('POLYMARKET_PRIVATE_KEY') || reason.includes('required');
+            const isTls = reason.includes('certificate') || reason.includes('TLS') || reason.includes('clob.polymarket.com');
+            statusEl.textContent = isMissingSecret
+                ? 'Paper dashboard: wallet credentials not loaded'
+                : 'Remote account unavailable';
             statusEl.className = 'text-sm text-red-400';
+            detailEl.textContent = isMissingSecret
+                ? 'Current balance shown in Shared Capital is local paper accounting. Wallet USDC is not being used by this dashboard process.'
+                : (isTls
+                    ? 'Authenticated CLOB check is blocked by network/TLS verification. Wallet balance cannot be verified safely from here.'
+                    : `Reason: ${reason}`);
+            detailEl.className = isMissingSecret || isTls ? 'text-xs text-yellow-400 mt-2' : 'text-xs text-gray-500 mt-2';
             document.getElementById('remote-balance').textContent = '-';
             document.getElementById('remote-allowances').textContent = '-';
             document.getElementById('remote-open-orders').textContent = '-';
@@ -235,6 +253,8 @@ async function refreshAccount() {
         }
         statusEl.textContent = 'Authenticated CLOB account connected';
         statusEl.className = 'text-sm text-green-400';
+        detailEl.textContent = 'Wallet data is read from the authenticated Polymarket CLOB account.';
+        detailEl.className = 'text-xs text-green-400 mt-2';
         const balance = account.collateral_balance_usd ?? account.collateral_balance ?? 0;
         document.getElementById('remote-balance').textContent = `$${Number(balance).toFixed(2)}`;
         document.getElementById('remote-allowances').textContent = account.allowance_contracts ?? '-';
@@ -243,6 +263,8 @@ async function refreshAccount() {
     } catch (err) {
         statusEl.textContent = 'Remote account check failed';
         statusEl.className = 'text-sm text-red-400';
+        detailEl.textContent = 'The dashboard could not call the account endpoint.';
+        detailEl.className = 'text-xs text-red-400 mt-2';
     }
 }
 
@@ -254,6 +276,19 @@ async function refreshProductionReadiness() {
         ]);
         const runtimeEl = document.getElementById('runtime-status');
         runtimeEl.textContent = `${readiness.runtime.environment} · ${readiness.runtime.mode} · ${readiness.runtime.strategy_version}`;
+        const capitalLabel = document.getElementById('capital-label');
+        const capitalSubtitle = document.getElementById('capital-subtitle');
+        if (capitalLabel && capitalSubtitle) {
+            if (readiness.runtime.mode === 'paper') {
+                capitalLabel.textContent = 'Local Shared Capital';
+                capitalSubtitle.textContent = 'Paper balance only; wallet USDC is not changing';
+                capitalSubtitle.className = 'text-xs text-yellow-400';
+            } else {
+                capitalLabel.textContent = 'Shared Capital';
+                capitalSubtitle.textContent = 'Runtime is not paper; verify wallet panel before trading';
+                capitalSubtitle.className = 'text-xs text-green-400';
+            }
+        }
 
         const canaryEl = document.getElementById('canary-status');
         const blockersEl = document.getElementById('canary-blockers');
@@ -528,40 +563,28 @@ function renderStats(id, stats) {
 
 // Load initial data
 async function loadInitialData() {
-    try {
-        const [priceRes, updownRes, statsRes, settingsRes, signalRes, tradesRes] = await Promise.all([
-            fetch('/api/price'),
-            fetch('/api/updown'),
-            fetch('/api/stats'),
-            fetch('/api/settings'),
-            fetch('/api/signals'),
-            fetch('/api/trades')
-        ]);
-        
-        const price = await priceRes.json();
-        updatePrice(price);
-        
-        const updownData = await updownRes.json();
-        updateUpDownMarkets(updownData.markets);
-        
-        const stats = await statsRes.json();
-        updateStats(stats);
-        
-        const settings = await settingsRes.json();
-        loadSettings(settings);
-        
-        const signalData = await signalRes.json();
-        if (signalData.signal) {
-            updateSignal(signalData.signal);
-        }
-        if (signalData.signal_5m) {
-            updateSignal(signalData.signal_5m, '5m');
-        }
+    const loadJson = async (url) => {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`${url} returned ${res.status}`);
+        return res.json();
+    };
 
-        const tradeData = await tradesRes.json();
-        updateTrades(tradeData.trades);
-    } catch (err) {
-        console.error('Failed to load initial data:', err);
+    const loaders = [
+        loadJson('/api/price').then(updatePrice),
+        loadJson('/api/updown').then(data => updateUpDownMarkets(data.markets)),
+        loadJson('/api/stats').then(updateStats),
+        loadJson('/api/settings').then(loadSettings),
+        loadJson('/api/signals').then(data => {
+            if (data.signal) updateSignal(data.signal);
+            if (data.signal_5m) updateSignal(data.signal_5m, '5m');
+        }),
+        loadJson('/api/trades').then(data => updateTrades(data.trades)),
+    ];
+
+    const results = await Promise.allSettled(loaders);
+    const failed = results.filter(result => result.status === 'rejected');
+    if (failed.length) {
+        console.warn('Some dashboard panels failed to load', failed.map(result => result.reason?.message || result.reason));
     }
 }
 
